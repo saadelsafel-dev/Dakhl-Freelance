@@ -1,0 +1,119 @@
+{
+  "entities": {
+    "Profile": {
+      "title": "Dakhl Profile",
+      "description": "User profile, skills, experience level, and opportunity interests for Dakhl.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Firebase Auth UID matching the document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "description": "Unique lowercase handle.",
+          "minLength": 3,
+          "maxLength": 24,
+          "pattern": "^[a-z0-9_]{3,24}$"
+        },
+        "display_name": {
+          "type": "string",
+          "description": "Full display name.",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "avatar_url": {
+          "type": "string",
+          "description": "Optional public avatar URL.",
+          "maxLength": 1000
+        },
+        "governorate": {
+          "type": "string",
+          "description": "Optional governorate name.",
+          "maxLength": 80
+        },
+        "city": {
+          "type": "string",
+          "description": "Optional city name.",
+          "maxLength": 80
+        },
+        "bio": {
+          "type": "string",
+          "description": "Short biography.",
+          "maxLength": 300
+        },
+        "experience_level": {
+          "type": "string",
+          "description": "Self-selected experience level.",
+          "enum": ["beginner", "intermediate", "professional", "no_experience"]
+        },
+        "profile_completed": {
+          "type": "boolean",
+          "description": "Indicates onboarding completion."
+        },
+        "skills": {
+          "type": "array",
+          "description": "Up to 20 selected skills (1-60 chars each)."
+        },
+        "interests": {
+          "type": "array",
+          "description": "1 to 20 opportunity interests (1-60 chars each)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when last updated."
+        }
+      },
+      "required": [
+        "id",
+        "username",
+        "display_name",
+        "experience_level",
+        "profile_completed",
+        "skills",
+        "interests",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UsernameReservation": {
+      "title": "Username Reservation",
+      "description": "Atomic lowercase username reservation document.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when reserved."
+        }
+      },
+      "required": ["userId", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/profiles/{userId}": {
+      "schema": { "$ref": "#/entities/Profile" },
+      "description": "Completed user profiles keyed by Firebase Auth UID."
+    },
+    "/usernames/{username}": {
+      "schema": { "$ref": "#/entities/UsernameReservation" },
+      "description": "Lowercase username reservations enforcing global uniqueness."
+    }
+  }
+}

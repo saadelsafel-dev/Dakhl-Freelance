@@ -1,0 +1,6 @@
+{
+  "name": "دخل | فرصتك تبدأ من هنا",
+  "description": "دخل — اكتشف فرص العمل وتواصل مع أصحاب المهارات.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
