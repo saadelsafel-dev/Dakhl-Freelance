@@ -1777,8 +1777,13 @@ function TopupRequestDialog({
         >
           <X size={19} />
         </button>
-        <div className="dialog-icon">
-          <Wallet size={20} />
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div className="dialog-icon">
+            <Wallet size={20} />
+          </div>
+          <strong dir="ltr" style={{ fontSize: 14, color: "#143f32", letterSpacing: "0.02em" }}>
+            01020117504
+          </strong>
         </div>
         <h2 id="dialog-title">طلب شحن المحفظة</h2>
         <p className="dialog-description">
