@@ -12,6 +12,7 @@ export interface DakhlProfile {
   profile_completed: boolean;
   skills: string[];
   interests: string[];
+  has_balance?: boolean;
 }
 
 export interface AuthMeta {

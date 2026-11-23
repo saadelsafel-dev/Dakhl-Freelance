@@ -243,15 +243,17 @@ export async function approveTopupRequest(params: {
 
   const reqRef = doc(db, "topup_requests", params.request.id);
   const walletRef = doc(db, "wallets", params.request.userId);
+  const profileRef = doc(db, "profiles", params.request.userId);
   const txId = crypto.randomUUID();
   const txRef = doc(db, "wallet_transactions", txId);
   const cleanNote = params.adminNote.trim().slice(0, 300) || null;
 
   try {
     await runTransaction(db, async (transaction) => {
-      const [reqSnap, walletSnap] = await Promise.all([
+      const [reqSnap, walletSnap, profileSnap] = await Promise.all([
         transaction.get(reqRef),
         transaction.get(walletRef),
+        transaction.get(profileRef),
       ]);
 
       if (!reqSnap.exists() || reqSnap.data().status !== "pending") {
@@ -269,6 +271,7 @@ export async function approveTopupRequest(params: {
 
       const nextBalance = prevBalance + amountEgp;
       const nextRemaining = prevRemaining + txCount;
+      const nextHasBalance = nextBalance > 0 || nextRemaining > 0;
 
       if (!walletSnap.exists()) {
         transaction.set(walletRef, {
@@ -283,6 +286,13 @@ export async function approveTopupRequest(params: {
           balance_egp: nextBalance,
           remaining_transactions: nextRemaining,
           is_unlocked: nextRemaining > 0,
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      if (profileSnap.exists()) {
+        transaction.update(profileRef, {
+          has_balance: nextHasBalance,
           updatedAt: serverTimestamp(),
         });
       }
@@ -354,13 +364,17 @@ export async function manualCreditWallet(params: {
   }
 
   const walletRef = doc(db, "wallets", params.targetUserId);
+  const profileRef = doc(db, "profiles", params.targetUserId);
   const txId = crypto.randomUUID();
   const txRef = doc(db, "wallet_transactions", txId);
   const cleanTitle = (params.title?.trim() || `إضافة رصيد يدوية (${txDelta} معاملات)`).slice(0, 120);
 
   try {
     await runTransaction(db, async (transaction) => {
-      const walletSnap = await transaction.get(walletRef);
+      const [walletSnap, profileSnap] = await Promise.all([
+        transaction.get(walletRef),
+        transaction.get(profileRef),
+      ]);
       const prevBalance =
         walletSnap.exists() && typeof walletSnap.data().balance_egp === "number"
           ? walletSnap.data().balance_egp
@@ -372,6 +386,7 @@ export async function manualCreditWallet(params: {
 
       const nextBalance = prevBalance + amountDelta;
       const nextRemaining = prevRemaining + txDelta;
+      const nextHasBalance = nextBalance > 0 || nextRemaining > 0;
 
       if (!walletSnap.exists()) {
         transaction.set(walletRef, {
@@ -386,6 +401,13 @@ export async function manualCreditWallet(params: {
           balance_egp: nextBalance,
           remaining_transactions: nextRemaining,
           is_unlocked: nextRemaining > 0,
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      if (profileSnap.exists()) {
+        transaction.update(profileRef, {
+          has_balance: nextHasBalance,
           updatedAt: serverTimestamp(),
         });
       }
@@ -405,6 +427,37 @@ export async function manualCreditWallet(params: {
   } catch (error: unknown) {
     handleFirestoreError(error, OperationType.WRITE, `wallets/${params.targetUserId}`);
   }
+}
+
+export async function syncProfileBalanceVisibility(userId: string, hasBalance: boolean): Promise<void> {
+  const profileRef = doc(db, "profiles", userId);
+  try {
+    await updateDoc(profileRef, {
+      has_balance: hasBalance,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error: unknown) {
+    handleFirestoreError(error, OperationType.UPDATE, `profiles/${userId}`);
+  }
+}
+
+export function mapProfileDoc(id: string, data: Record<string, unknown>): DakhlProfile {
+  return {
+    id: typeof data.id === "string" ? data.id : id,
+    username: typeof data.username === "string" ? data.username : "",
+    display_name: typeof data.display_name === "string" ? data.display_name : "",
+    avatar_url: typeof data.avatar_url === "string" ? data.avatar_url : null,
+    governorate: typeof data.governorate === "string" ? data.governorate : null,
+    city: typeof data.city === "string" ? data.city : null,
+    bio: typeof data.bio === "string" ? data.bio : null,
+    experience_level: (data.experience_level as DakhlProfile["experience_level"]) ?? null,
+    profile_completed: Boolean(data.profile_completed),
+    skills: Array.isArray(data.skills) ? data.skills.filter((s): s is string => typeof s === "string") : [],
+    interests: Array.isArray(data.interests)
+      ? data.interests.filter((s): s is string => typeof s === "string")
+      : [],
+    has_balance: Boolean(data.has_balance),
+  };
 }
 
 export function mapWalletDoc(userId: string, data: Record<string, unknown> | undefined): WalletRecord {

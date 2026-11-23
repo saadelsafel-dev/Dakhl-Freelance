@@ -142,6 +142,7 @@ export default function AuthFlow({ children }: AuthFlowProps) {
             interests: Array.isArray(data.interests)
               ? data.interests.filter((item): item is string => typeof item === "string")
               : [],
+            has_balance: Boolean(data.has_balance),
           });
         } else {
           setProfile(null);
@@ -483,6 +484,7 @@ function Onboarding({
               profile_completed: true,
               skills: cleanSkills,
               interests: cleanInterests,
+              has_balance: false,
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
             });

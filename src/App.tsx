@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { collection, doc, onSnapshot, query, where } from "firebase/firestore";
 import logo from "./logo.png";
 import {
@@ -23,6 +23,7 @@ import {
   Search,
   Send,
   ShieldCheck,
+  Users,
   Wallet,
   X,
 } from "lucide-react";
@@ -31,12 +32,14 @@ import {
   approveTopupRequest,
   formatArabicDate,
   manualCreditWallet,
+  mapProfileDoc,
   mapWalletDoc,
   mapWalletSettingsDoc,
   MAX_TOPUP_TRANSACTIONS,
   rejectTopupRequest,
   saveWalletSettings,
   submitTopupRequest,
+  syncProfileBalanceVisibility,
   timestampToMillis,
 } from "./lib/wallet";
 import type {
@@ -49,7 +52,7 @@ import type {
   WalletTransactionRecord,
 } from "./types/profile";
 
-type Section = "home" | "discover" | "opportunities" | "messages" | "wallet" | "profile" | "admin";
+type Section = "home" | "discover" | "opportunities" | "messages" | "assign" | "wallet" | "profile" | "admin";
 
 type Person = {
   id: string;
@@ -91,6 +94,7 @@ const baseNavItems: { id: Section; label: string; icon: typeof House }[] = [
   { id: "discover", label: "اكتشف أشخاصًا", icon: Compass },
   { id: "opportunities", label: "الفرص", icon: BriefcaseBusiness },
   { id: "messages", label: "الرسائل", icon: MessageCircle },
+  { id: "assign", label: "تعيين", icon: Users },
   { id: "wallet", label: "المحفظة", icon: Wallet },
 ];
 
@@ -99,6 +103,7 @@ const sectionTitles: Record<Section, string> = {
   discover: "اكتشف أشخاصًا",
   opportunities: "فرص مناسبة لك",
   messages: "رسائلك",
+  assign: "تعيين",
   wallet: "محفظتك",
   profile: "ملفي الشخصي",
   admin: "إدارة المحافظ والشحن",
@@ -134,7 +139,10 @@ function App({
 
   const [adminRequests, setAdminRequests] = useState<TopupRequestRecord[]>([]);
   const [adminWallets, setAdminWallets] = useState<Record<string, WalletRecord>>({});
+  const [adminWalletsReady, setAdminWalletsReady] = useState(false);
   const [adminProfiles, setAdminProfiles] = useState<DakhlProfile[]>([]);
+  const [fundedProfiles, setFundedProfiles] = useState<DakhlProfile[]>([]);
+  const syncedBalanceFlagsRef = useRef<Record<string, boolean>>({});
   const [receiptPreviewUrl, setReceiptPreviewUrl] = useState<string | null>(null);
   const [manualCreditTarget, setManualCreditTarget] = useState<DakhlProfile | null>(null);
   const [fatalError, setFatalError] = useState<Error | null>(null);
@@ -258,6 +266,7 @@ function App({
           map[d.id] = mapWalletDoc(d.id, d.data());
         }
         setAdminWallets(map);
+        setAdminWalletsReady(true);
       },
       (error) => {
         try {
@@ -271,24 +280,7 @@ function App({
     const unsubAllProfiles = onSnapshot(
       collection(db, "profiles"),
       (snapshot) => {
-        const list: DakhlProfile[] = snapshot.docs.map((d) => {
-          const data = d.data();
-          return {
-            id: typeof data.id === "string" ? data.id : d.id,
-            username: typeof data.username === "string" ? data.username : "",
-            display_name: typeof data.display_name === "string" ? data.display_name : "",
-            avatar_url: typeof data.avatar_url === "string" ? data.avatar_url : null,
-            governorate: typeof data.governorate === "string" ? data.governorate : null,
-            city: typeof data.city === "string" ? data.city : null,
-            bio: typeof data.bio === "string" ? data.bio : null,
-            experience_level: (data.experience_level as DakhlProfile["experience_level"]) ?? null,
-            profile_completed: Boolean(data.profile_completed),
-            skills: Array.isArray(data.skills) ? data.skills.filter((s): s is string => typeof s === "string") : [],
-            interests: Array.isArray(data.interests)
-              ? data.interests.filter((s): s is string => typeof s === "string")
-              : [],
-          };
-        });
+        const list: DakhlProfile[] = snapshot.docs.map((d) => mapProfileDoc(d.id, d.data()));
         setAdminProfiles(list);
       },
       (error) => {
@@ -306,6 +298,49 @@ function App({
       unsubAllProfiles();
     };
   }, [isSuperUser]);
+
+  useEffect(() => {
+    if (!isSuperUser || !adminWalletsReady) return;
+
+    for (const userProfile of adminProfiles) {
+      const userWallet = adminWallets[userProfile.id];
+      const expectedHasBalance =
+        (userWallet?.balance_egp ?? 0) > 0 || (userWallet?.remaining_transactions ?? 0) > 0;
+      const currentFlag = Boolean(userProfile.has_balance);
+
+      if (currentFlag !== expectedHasBalance && syncedBalanceFlagsRef.current[userProfile.id] !== expectedHasBalance) {
+        syncedBalanceFlagsRef.current[userProfile.id] = expectedHasBalance;
+        void syncProfileBalanceVisibility(userProfile.id, expectedHasBalance).catch((error: unknown) => {
+          if (error instanceof Error) setFatalError(error);
+        });
+      }
+    }
+  }, [isSuperUser, adminWalletsReady, adminProfiles, adminWallets]);
+
+  useEffect(() => {
+    if (isSuperUser || isLocked) {
+      setFundedProfiles([]);
+      return;
+    }
+
+    const fundedQuery = query(collection(db, "profiles"), where("has_balance", "==", true));
+    const unsubFunded = onSnapshot(
+      fundedQuery,
+      (snapshot) => {
+        const list = snapshot.docs.map((d) => mapProfileDoc(d.id, d.data()));
+        setFundedProfiles(list);
+      },
+      (error) => {
+        try {
+          handleFirestoreError(error, OperationType.LIST, "profiles");
+        } catch (wrapped: unknown) {
+          if (wrapped instanceof Error) setFatalError(wrapped);
+        }
+      },
+    );
+
+    return () => unsubFunded();
+  }, [isSuperUser, isLocked]);
 
   const filteredPeople = useMemo(() => {
     const queryText = search.trim().toLowerCase();
@@ -543,6 +578,19 @@ function App({
                   onSend={sendMessage}
                 />
               )}
+              {effectiveSection === "assign" && (
+                <AssignContent
+                  isSuperUser={isSuperUser}
+                  profiles={isSuperUser ? adminProfiles : fundedProfiles}
+                  wallets={adminWallets}
+                  search={search}
+                  setSearch={setSearch}
+                  saved={saved}
+                  setSaved={setSaved}
+                  onConnect={(member) => openConnection(profileToPerson(member))}
+                  onOpenManualCredit={setManualCreditTarget}
+                />
+              )}
               {effectiveSection === "wallet" && (
                 <WalletContent
                   isLocked={false}
@@ -625,7 +673,7 @@ function App({
       </div>
 
       <nav className="mobile-nav" aria-label="التنقل">
-        {navItems.slice(0, 5).map((item) => {
+        {baseNavItems.map((item) => {
           const Icon = item.icon;
           const itemLocked = isLocked && item.id !== "wallet";
           return (
@@ -988,6 +1036,211 @@ function PersonCard({
         </button>
       </div>
     </article>
+  );
+}
+
+function profileToPerson(member: DakhlProfile): Person {
+  return {
+    id: member.id,
+    name: member.display_name,
+    role: experienceLabel(member.experience_level),
+    location: [member.city, member.governorate].filter(Boolean).join("، ") || "مصر",
+    skills: member.skills.length > 0 ? member.skills : member.interests,
+    avatar: getInitials(member.display_name),
+    tone: "blue",
+  };
+}
+
+function AssignContent({
+  isSuperUser,
+  profiles,
+  wallets,
+  search,
+  setSearch,
+  saved,
+  setSaved,
+  onConnect,
+  onOpenManualCredit,
+}: {
+  isSuperUser: boolean;
+  profiles: DakhlProfile[];
+  wallets: Record<string, WalletRecord>;
+  search: string;
+  setSearch: (value: string) => void;
+  saved: string[];
+  setSaved: (value: string[] | ((current: string[]) => string[])) => void;
+  onConnect: (member: DakhlProfile) => void;
+  onOpenManualCredit: (target: DakhlProfile) => void;
+}) {
+  const [balanceFilter, setBalanceFilter] = useState<"all" | "zero" | "funded">("all");
+  const [skillFilter, setSkillFilter] = useState("الكل");
+
+  const visibleMembers = useMemo(() => {
+    const queryText = search.trim().toLowerCase();
+    return profiles.filter((member) => {
+      const userWallet = wallets[member.id];
+      const hasBalance = isSuperUser
+        ? (userWallet?.balance_egp ?? 0) > 0 || (userWallet?.remaining_transactions ?? 0) > 0
+        : Boolean(member.has_balance);
+
+      if (!isSuperUser && !hasBalance) return false;
+      if (isSuperUser && balanceFilter === "zero" && hasBalance) return false;
+      if (isSuperUser && balanceFilter === "funded" && !hasBalance) return false;
+
+      const tags = member.skills.length > 0 ? member.skills : member.interests;
+      const matchesSkill =
+        isSuperUser ||
+        skillFilter === "الكل" ||
+        tags.some((item) => item.includes(skillFilter));
+
+      const haystack = `${member.display_name} ${member.username} ${member.city ?? ""} ${member.governorate ?? ""} ${member.bio ?? ""} ${tags.join(" ")}`.toLowerCase();
+      const matchesSearch = !queryText || haystack.includes(queryText);
+
+      return matchesSkill && matchesSearch;
+    });
+  }, [profiles, wallets, isSuperUser, balanceFilter, skillFilter, search]);
+
+  return (
+    <section className="section-block discover-page" style={{ marginTop: 0 }}>
+      <div className="discover-toolbar">
+        <div className="filter-row" style={{ flexWrap: "wrap", width: "100%" }}>
+          <label className="inline-search">
+            <Search size={16} />
+            <input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="ابحث بالاسم، اسم المستخدم، أو المهارة"
+            />
+          </label>
+          {isSuperUser ? (
+            <>
+              {(
+                [
+                  { id: "all", label: "الكل" },
+                  { id: "zero", label: "رصيد ٠ (للإدارة فقط)" },
+                  { id: "funded", label: "معاهم رصيد (ظاهر للجميع)" },
+                ] as const
+              ).map((chip) => (
+                <button
+                  key={chip.id}
+                  className={`filter-chip ${balanceFilter === chip.id ? "selected" : ""}`}
+                  onClick={() => setBalanceFilter(chip.id)}
+                >
+                  {chip.label}
+                </button>
+              ))}
+            </>
+          ) : (
+            ["الكل", "تصميم", "كتابة", "تطوير"].map((filter) => (
+              <button
+                key={filter}
+                className={`filter-chip ${skillFilter === filter ? "selected" : ""}`}
+                onClick={() => setSkillFilter(filter)}
+              >
+                {filter}
+              </button>
+            ))
+          )}
+        </div>
+      </div>
+
+      <div className="people-grid">
+        {visibleMembers.map((member) => {
+          const userWallet = wallets[member.id];
+          const balanceEgp = userWallet?.balance_egp ?? 0;
+          const remainingTx = userWallet?.remaining_transactions ?? 0;
+          const hasBalance = isSuperUser
+            ? balanceEgp > 0 || remainingTx > 0
+            : Boolean(member.has_balance);
+          const locationText = [member.city, member.governorate].filter(Boolean).join("، ") || "غير محدد";
+          const tags = member.skills.length > 0 ? member.skills : member.interests;
+          const isSaved = saved.includes(member.id);
+
+          return (
+            <article className="person-card" key={member.id}>
+              <div className="person-card-top">
+                <div className="person-avatar blue" style={{ overflow: "hidden" }}>
+                  {member.avatar_url ? (
+                    <img
+                      src={member.avatar_url}
+                      alt={member.display_name}
+                      style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "50%" }}
+                    />
+                  ) : (
+                    getInitials(member.display_name)
+                  )}
+                </div>
+                <button
+                  className={`save-button ${isSaved ? "saved" : ""}`}
+                  aria-label={isSaved ? "إزالة من المحفوظات" : "حفظ الملف"}
+                  onClick={() =>
+                    setSaved((current) =>
+                      current.includes(member.id)
+                        ? current.filter((id) => id !== member.id)
+                        : [...current, member.id],
+                    )
+                  }
+                >
+                  <Heart size={17} fill={isSaved ? "currentColor" : "none"} />
+                </button>
+              </div>
+              <div className="person-name-row">
+                <h3>{member.display_name}</h3>
+              </div>
+              <p className="person-role">
+                @{member.username} · {experienceLabel(member.experience_level)}
+              </p>
+              <div className="person-location">
+                <MapPin size={14} />
+                {locationText}
+              </div>
+              <div className="skill-list">
+                {tags.slice(0, 4).map((skill) => (
+                  <span key={skill}>{skill}</span>
+                ))}
+              </div>
+              <div className="person-card-footer">
+                {isSuperUser ? (
+                  <>
+                    <span
+                      style={{
+                        fontSize: 9,
+                        fontWeight: 600,
+                        color: hasBalance ? "#24543c" : "#997467",
+                      }}
+                    >
+                      {hasBalance
+                        ? `الرصيد: ${formatArabicNumber(balanceEgp)} ج.م · ظاهر للجميع`
+                        : "رصيد ٠ · ظاهر للإدارة فقط"}
+                    </span>
+                    <button
+                      type="button"
+                      className="connect-button"
+                      onClick={() => onOpenManualCredit(member)}
+                    >
+                      <Plus size={13} /> إضافة رصيد
+                    </button>
+                  </>
+                ) : (
+                  <button className="connect-button" onClick={() => onConnect(member)}>
+                    تواصل <ArrowLeft size={14} />
+                  </button>
+                )}
+              </div>
+            </article>
+          );
+        })}
+        {visibleMembers.length === 0 && (
+          <div className="empty-state">
+            {search.trim() || (isSuperUser ? balanceFilter !== "all" : skillFilter !== "الكل")
+              ? "لا توجد نتائج مطابقة للبحث الحالي."
+              : isSuperUser
+                ? "لا يوجد أعضاء مسجلون بعد."
+                : "لا يوجد أعضاء لديهم رصيد متاح للعرض حاليًا."}
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 

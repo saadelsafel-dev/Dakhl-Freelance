@@ -7,6 +7,7 @@
 4. **Terminal State Locking**: Once a top-up request transitions from `pending` to `approved` or `rejected`, it CANNOT be modified again.
 5. **Atomic Approval**: Approving a `topup_requests/{requestId}` requires `/wallets/{userId}` to be written atomically in the same transaction (`existsAfter(...)`).
 6. **PII & Query Isolation**: Non-admin users can only `get` and `list` their own `topup_requests` and `wallet_transactions` (`resource.data.userId == request.auth.uid`).
+7. **Directory Balance Visibility**: Normal signed-in users can only `get` or `list` `/profiles/{userId}` documents where `has_balance == true` (or their own profile). Profiles with `0` balance (`has_balance == false` or unset) are readable only by their owner and `isAdmin()`. Normal users CANNOT set or modify `has_balance`.
 
 ## 2. The "Dirty Dozen" Payloads (Expected: PERMISSION_DENIED)
 1. **Self-Crediting Wallet**: Normal user writing `/wallets/user123` with `balance_egp: 99999`.
@@ -18,6 +19,6 @@
 7. **Normal User Updating Pending Request**: Normal user modifying `requested_transactions` or `status` on `/topup_requests/req1` after submission.
 8. **Orphaned Approval**: Approving `/topup_requests/req1` without atomically writing `/wallets/{userId}` in the same transaction.
 9. **Normal User Reading Another User's Top-up Request**: User A reading `/topup_requests/req_of_user_b`.
-10. **Normal User Blanket List Query on Top-up Requests**: Normal user calling `getDocs(collection(db, "topup_requests"))` without `where("userId", "==", uid)`.
-11. **Ledger Tampering**: Normal user creating or anyone updating/deleting `/wallet_transactions/tx1`.
+10. **Normal User Blanket List Query on Profiles**: Normal user calling `getDocs(collection(db, "profiles"))` without `where("has_balance", "==", true)`.
+11. **Self-Setting `has_balance: true` on Profile**: Normal user creating or updating `/profiles/user123` with `has_balance: true`.
 12. **Shadow Ghost Field Injection**: Injecting `isAdmin: true` into `/profiles/user123` or `/topup_requests/req1`.

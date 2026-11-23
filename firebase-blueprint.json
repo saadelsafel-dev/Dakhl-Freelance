@@ -62,6 +62,10 @@
           "type": "array",
           "description": "1 to 20 opportunity interests (1-60 chars each)."
         },
+        "has_balance": {
+          "type": "boolean",
+          "description": "Admin-controlled visibility flag indicating the user has wallet balance or transaction credits."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -81,6 +85,7 @@
         "profile_completed",
         "skills",
         "interests",
+        "has_balance",
         "createdAt",
         "updatedAt"
       ]

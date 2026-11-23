@@ -65,13 +65,13 @@ service cloud.firestore {
           'profile_completed',
           'skills',
           'interests',
+          'has_balance',
           'createdAt',
           'updatedAt'
         ])
         && data.id is string
         && isValidId(data.id)
         && data.id == userId
-        && data.id == request.auth.uid
         && isValidUsername(data.username)
         && data.display_name is string
         && data.display_name.size() >= 2
@@ -93,6 +93,7 @@ service cloud.firestore {
         && data.interests[0] is string
         && data.interests[0].size() >= 1
         && data.interests[0].size() <= 60
+        && (!('has_balance' in data) || data.has_balance is bool)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -291,37 +292,42 @@ service cloud.firestore {
     }
 
     match /profiles/{userId} {
-      allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin());
-      allow list: if isAdmin();
+      allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin() || existing().has_balance == true);
+      allow list: if isSignedIn() && (isAdmin() || resource.data.has_balance == true);
       allow create: if isVerifiedUser()
         && isValidId(userId)
         && isOwner(userId)
         && isValidProfile(incoming(), userId)
+        && ('has_balance' in incoming())
+        && incoming().has_balance == false
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
         && existsAfter(/databases/$(database)/documents/usernames/$(incoming().username))
         && getAfter(/databases/$(database)/documents/usernames/$(incoming().username)).data.userId == userId;
       allow update: if isVerifiedUser()
         && isValidId(userId)
-        && isOwner(userId)
         && isValidProfile(incoming(), userId)
         && incoming().id == existing().id
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
-          incoming().diff(existing()).affectedKeys().hasOnly([
-            'display_name',
-            'avatar_url',
-            'governorate',
-            'city',
-            'bio',
-            'experience_level',
-            'skills',
-            'interests',
-            'updatedAt'
-          ])
+          (
+            isOwner(userId)
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'display_name',
+              'avatar_url',
+              'governorate',
+              'city',
+              'bio',
+              'experience_level',
+              'skills',
+              'interests',
+              'updatedAt'
+            ])
+          )
           || (
-            incoming().diff(existing()).affectedKeys().hasOnly([
+            isOwner(userId)
+            && incoming().diff(existing()).affectedKeys().hasOnly([
               'username',
               'display_name',
               'avatar_url',
@@ -335,6 +341,14 @@ service cloud.firestore {
             ])
             && existsAfter(/databases/$(database)/documents/usernames/$(incoming().username))
             && getAfter(/databases/$(database)/documents/usernames/$(incoming().username)).data.userId == userId
+          )
+          || (
+            isAdmin()
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'has_balance',
+              'updatedAt'
+            ])
+            && incoming().has_balance is bool
           )
         );
       allow delete: if false;
