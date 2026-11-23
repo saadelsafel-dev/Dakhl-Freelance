@@ -76,7 +76,7 @@ service cloud.firestore {
         && data.display_name is string
         && data.display_name.size() >= 2
         && data.display_name.size() <= 80
-        && (!('avatar_url' in data) || data.avatar_url == null || (data.avatar_url is string && data.avatar_url.size() <= 1000))
+        && (!('avatar_url' in data) || data.avatar_url == null || (data.avatar_url is string && data.avatar_url.size() <= 50000))
         && (!('governorate' in data) || data.governorate == null || (data.governorate is string && data.governorate.size() <= 80))
         && (!('city' in data) || data.city == null || (data.city is string && data.city.size() <= 80))
         && (!('bio' in data) || data.bio == null || (data.bio is string && data.bio.size() <= 300))

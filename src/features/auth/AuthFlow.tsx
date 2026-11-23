@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
-import { onAuthStateChanged, signInWithPopup, signOut as firebaseSignOut, type User } from "firebase/auth";
-import { doc, onSnapshot, runTransaction, serverTimestamp } from "firebase/firestore";
+import {
+  onAuthStateChanged,
+  sendEmailVerification,
+  signInWithPopup,
+  signOut as firebaseSignOut,
+  type User,
+} from "firebase/auth";
+import { doc, getDoc, onSnapshot, runTransaction, serverTimestamp } from "firebase/firestore";
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import {
   ArrowLeft,
@@ -32,7 +38,7 @@ const SKILL_MAX_COUNT = 20;
 const SKILL_MAX_LENGTH = 60;
 const INTEREST_MIN_COUNT = 1;
 const INTEREST_MAX_COUNT = 20;
-const AVATAR_URL_MAX = 1000;
+const AVATAR_URL_MAX = 50000;
 
 const suggestedSkills = [
   "تصميم جرافيك",
@@ -85,6 +91,7 @@ export default function AuthFlow({ children }: AuthFlowProps) {
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileError, setProfileError] = useState("");
   const [profileRefresh, setProfileRefresh] = useState(0);
+  const [, setAuthTick] = useState(0);
   const [fatalError, setFatalError] = useState<Error | null>(null);
 
   if (fatalError) {
@@ -218,6 +225,24 @@ export default function AuthFlow({ children }: AuthFlowProps) {
     );
   }
 
+  if (!user.emailVerified) {
+    return (
+      <VerifyEmailPage
+        email={user.email ?? ""}
+        onSendVerification={async () => {
+          await sendEmailVerification(user);
+        }}
+        onRefresh={async () => {
+          await user.reload();
+          await user.getIdToken(true);
+          setAuthTick((value) => value + 1);
+          setProfileRefresh((value) => value + 1);
+        }}
+        onSignOut={signOut}
+      />
+    );
+  }
+
   if (!profile?.profile_completed) {
     return (
       <Onboarding
@@ -324,6 +349,7 @@ function Onboarding({
   );
   const [interests, setInterests] = useState<string[]>(initialProfile?.interests ?? []);
   const [saving, setSaving] = useState(false);
+  const [checkingStep, setCheckingStep] = useState(false);
   const [error, setError] = useState("");
   const previewUrl = useMemo(
     () => (avatarFile ? URL.createObjectURL(avatarFile) : avatarUrl),
@@ -358,11 +384,12 @@ function Onboarding({
     setError("");
   }
 
-  function continueToNextStep(event: FormEvent<HTMLFormElement>) {
+  async function continueToNextStep(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
     if (step === 0) {
-      if (!USERNAME_PATTERN.test(username.trim().toLowerCase())) {
+      const cleanUsername = username.trim().toLowerCase();
+      if (!USERNAME_PATTERN.test(cleanUsername)) {
         setError("اسم المستخدم يجب أن يتكون من ٣ إلى ٢٤ حرفًا إنجليزيًا صغيرًا أو رقمًا أو _.");
         return;
       }
@@ -370,6 +397,18 @@ function Onboarding({
       if (cleanName.length < DISPLAY_NAME_MIN || cleanName.length > DISPLAY_NAME_MAX) {
         setError("اكتب اسمًا كاملًا بين حرفين و٨٠ حرفًا.");
         return;
+      }
+      setCheckingStep(true);
+      try {
+        const usernameSnap = await getDoc(doc(db, "usernames", cleanUsername));
+        if (usernameSnap.exists() && usernameSnap.data().userId !== user.uid) {
+          setError("اسم المستخدم مستخدم بالفعل. اختر اسمًا آخر.");
+          return;
+        }
+      } catch {
+        // Proceed if offline check cannot run; transaction will validate availability
+      } finally {
+        setCheckingStep(false);
       }
     }
     if (step === 2) {
@@ -426,16 +465,10 @@ function Onboarding({
 
       if (avatarFile) {
         try {
-          const extension = avatarFile.name.split(".").pop()?.replace(/[^a-zA-Z0-9]/g, "") || "jpg";
-          const storageRef = ref(storage, `avatars/${user.uid}/${crypto.randomUUID()}.${extension}`);
-          await uploadBytes(storageRef, avatarFile, { contentType: avatarFile.type });
-          const downloadedUrl = await getDownloadURL(storageRef);
-          if (downloadedUrl.length <= AVATAR_URL_MAX) {
-            finalAvatarUrl = downloadedUrl;
-          }
+          finalAvatarUrl = await uploadAvatarImage(avatarFile, user.uid);
         } catch (uploadError: unknown) {
           console.error("Avatar upload failed:", uploadError);
-          setError("تعذر رفع الصورة الشخصية حاليًا. يمكنك المتابعة بدون صورة أو المحاولة مجددًا.");
+          setError("تعذر معالجة الصورة الشخصية. يمكنك المتابعة بدون صورة أو اختيار صورة أخرى.");
           setAvatarFile(null);
           setSaving(false);
           return;
@@ -506,6 +539,7 @@ function Onboarding({
         });
       } catch (txError: unknown) {
         if (txError instanceof Error && txError.message === "USERNAME_TAKEN") {
+          setStep(0);
           setError("اسم المستخدم مستخدم بالفعل. اختر اسمًا آخر.");
           setSaving(false);
           return;
@@ -763,10 +797,10 @@ function Onboarding({
                 <ArrowRight size={17} /> السابق
               </button>
             )}
-            <button type="submit" className="auth-submit" disabled={saving}>
-              {saving ? <LoaderCircle className="spin" size={18} /> : null}
+            <button type="submit" className="auth-submit" disabled={saving || checkingStep}>
+              {saving || checkingStep ? <LoaderCircle className="spin" size={18} /> : null}
               {step === 2 ? "إنهاء الإعداد" : "التالي"}
-              {!saving && <ArrowLeft size={17} />}
+              {!saving && !checkingStep && <ArrowLeft size={17} />}
             </button>
           </div>
         </form>
@@ -814,6 +848,151 @@ function StatusPage({
       </section>
     </main>
   );
+}
+
+function VerifyEmailPage({
+  email,
+  onSendVerification,
+  onRefresh,
+  onSignOut,
+}: {
+  email: string;
+  onSendVerification: () => Promise<void>;
+  onRefresh: () => Promise<void>;
+  onSignOut: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [err, setErr] = useState("");
+
+  async function handleSend() {
+    setBusy(true);
+    setNotice("");
+    setErr("");
+    try {
+      await onSendVerification();
+      setNotice("تم إرسال رابط التفعيل إلى بريدك الإلكتروني. افتح الرابط ثم اضغط «تحققت من البريد».");
+    } catch {
+      setErr("تعذر إرسال رابط التفعيل حاليًا. حاول بعد قليل أو سجّل الدخول بحساب Google موثق.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRefresh() {
+    setBusy(true);
+    setErr("");
+    try {
+      await onRefresh();
+    } catch {
+      setErr("تعذر التحقق من الحالة الآن. حاول مرة أخرى.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="auth-page" dir="rtl">
+      <section className="auth-card status-card">
+        <img className="auth-logo" src={logo} alt="دخل" />
+        <div className="auth-heading">
+          <span className="auth-kicker">تأكيد البريد الإلكتروني</span>
+          <h1>فعّل بريدك للمتابعة</h1>
+          <p>
+            لإنشاء حسابك وحفظ بياناتك بأمان، يجب أن يكون البريد الإلكتروني ({email || "الحالي"})
+            مؤكدًا.
+          </p>
+        </div>
+        {notice && (
+          <div className="auth-message success" role="status">
+            {notice}
+          </div>
+        )}
+        {err && (
+          <div className="auth-message error" role="alert">
+            {err}
+          </div>
+        )}
+        <div className="setup-actions" style={{ flexWrap: "wrap" }}>
+          <button className="setup-back" type="button" disabled={busy} onClick={() => void onSignOut()}>
+            <LogOut size={16} /> تسجيل الخروج
+          </button>
+          <button className="setup-back" type="button" disabled={busy} onClick={() => void handleSend()}>
+            إرسال رابط التفعيل
+          </button>
+          <button className="auth-submit" type="button" disabled={busy} onClick={() => void handleRefresh()}>
+            {busy ? <LoaderCircle className="spin" size={16} /> : null}
+            تحققت من البريد · متابعة <ArrowLeft size={17} />
+          </button>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+async function uploadAvatarImage(file: File, userId: string): Promise<string> {
+  const imageUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const element = new Image();
+      element.onload = () => resolve(element);
+      element.onerror = () => reject(new Error("INVALID_IMAGE"));
+      element.src = imageUrl;
+    });
+
+    const maxSide = 220;
+    const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+    const width = Math.max(1, Math.round(img.width * scale));
+    const height = Math.max(1, Math.round(img.height * scale));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("CANVAS_UNAVAILABLE");
+    ctx.drawImage(img, 0, 0, width, height);
+
+    let quality = 0.72;
+    let dataUrl = canvas.toDataURL("image/jpeg", quality);
+    while (dataUrl.length > 45000 && quality > 0.3) {
+      quality -= 0.12;
+      dataUrl = canvas.toDataURL("image/jpeg", quality);
+    }
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (result) => {
+          if (result) resolve(result);
+          else reject(new Error("BLOB_FAILED"));
+        },
+        "image/jpeg",
+        0.72,
+      );
+    });
+
+    try {
+      const storageRef = ref(storage, `avatars/${userId}/${crypto.randomUUID()}.jpg`);
+      const uploadPromise = uploadBytes(storageRef, blob, { contentType: "image/jpeg" }).then(() =>
+        getDownloadURL(storageRef),
+      );
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        window.setTimeout(() => reject(new Error("STORAGE_TIMEOUT")), 5000),
+      );
+      const url = await Promise.race([uploadPromise, timeoutPromise]);
+      if (url && url.length <= AVATAR_URL_MAX) {
+        return url;
+      }
+    } catch {
+      // Fallback to compact JPEG data URL when Storage bucket is unavailable on Spark tier
+    }
+
+    if (dataUrl.length > AVATAR_URL_MAX) {
+      throw new Error("AVATAR_TOO_LARGE");
+    }
+    return dataUrl;
+  } finally {
+    URL.revokeObjectURL(imageUrl);
+  }
 }
 
 function GoogleMark() {

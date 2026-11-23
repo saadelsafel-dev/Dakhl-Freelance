@@ -27,8 +27,8 @@
         },
         "avatar_url": {
           "type": "string",
-          "description": "Optional public avatar URL.",
-          "maxLength": 1000
+          "description": "Optional public avatar URL or compact compressed JPEG data URL.",
+          "maxLength": 50000
         },
         "governorate": {
           "type": "string",
