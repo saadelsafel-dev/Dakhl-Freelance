@@ -2447,24 +2447,16 @@ function Dialog({
         </h2>
         <p className="dialog-description">
           {isConnect
-            ? "طلب التواصل مجاني. عند القبول، تُخصم رسوم واضحة من الطرفين."
+            ? "طلب التواصل مجاني. عند القبول، تُخصم رسوم المعاملة من محفظتك."
             : "ساعد المجتمع على اكتشاف فرصة عملك أو مشروعك."}
         </p>
         {isConnect && (
           <div className="fee-breakdown">
-            <div>
-              <span>رسوم عليك عند القبول</span>
-              <strong>{formatArabicNumber(unitPriceEgp)} ج.م</strong>
-            </div>
-            <div>
-              <span>رسوم على الطرف الآخر عند القبول</span>
-              <strong>{formatArabicNumber(unitPriceEgp)} ج.م</strong>
-            </div>
             <div className="fee-total">
-              <span>إجمالي رسوم المنصة</span>
-              <strong>{formatArabicNumber(unitPriceEgp * 2)} ج.م</strong>
+              <span>رسوم المعاملة عند القبول</span>
+              <strong>{formatArabicNumber(unitPriceEgp)} ج.م</strong>
             </div>
-            <small>لن يُخصم شيء عند إرسال الطلب. يحتاج الطرفان إلى رصيد كافٍ قبل القبول.</small>
+            <small>لن يُخصم شيء عند إرسال الطلب، وتُخصم الرسوم عند القبول فقط.</small>
           </div>
         )}
         {type === "publish" && (
