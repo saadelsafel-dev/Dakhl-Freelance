@@ -20,7 +20,8 @@ import {
   OperationType,
   storage,
 } from "../../lib/firebase";
-import type { DakhlProfile, ExperienceLevel } from "../../types/profile";
+import { isSuperUserAccount } from "../../lib/wallet";
+import type { AuthMeta, DakhlProfile, ExperienceLevel } from "../../types/profile";
 
 const USERNAME_PATTERN = /^[a-z0-9_]{3,24}$/;
 const DISPLAY_NAME_MIN = 2;
@@ -69,7 +70,7 @@ const experienceOptions: { value: ExperienceLevel; label: string; description: s
 ];
 
 interface AuthFlowProps {
-  children: (profile: DakhlProfile, onSignOut: () => Promise<void>) => ReactNode;
+  children: (profile: DakhlProfile, onSignOut: () => Promise<void>, authMeta: AuthMeta) => ReactNode;
 }
 
 interface ProfileDraft extends Omit<DakhlProfile, "profile_completed"> {
@@ -229,7 +230,13 @@ export default function AuthFlow({ children }: AuthFlowProps) {
     );
   }
 
-  return <>{children(profile, signOut)}</>;
+  const authMeta: AuthMeta = {
+    email: user.email ?? "",
+    emailVerified: Boolean(user.emailVerified),
+    isSuperUser: isSuperUserAccount(user.email, Boolean(user.emailVerified)),
+  };
+
+  return <>{children(profile, signOut, authMeta)}</>;
 }
 
 function AuthPage({

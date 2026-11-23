@@ -104,6 +104,206 @@
         }
       },
       "required": ["userId", "createdAt"]
+    },
+    "WalletSettings": {
+      "title": "Wallet Pricing Settings",
+      "description": "Superuser-controlled pricing per transaction and minimum transaction count.",
+      "type": "object",
+      "properties": {
+        "transaction_price_egp": {
+          "type": "integer",
+          "description": "Price per transaction in EGP (1-100000)."
+        },
+        "min_transactions": {
+          "type": "integer",
+          "description": "Minimum transactions per top-up request (1-1000)."
+        },
+        "updatedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["transaction_price_egp", "min_transactions", "updatedBy", "updatedAt"]
+    },
+    "Wallet": {
+      "title": "User Wallet",
+      "description": "Admin-managed wallet holding EGP balance and remaining transaction attempts.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "balance_egp": {
+          "type": "integer",
+          "description": "Available EGP balance credited by admin."
+        },
+        "remaining_transactions": {
+          "type": "integer",
+          "description": "Available transaction attempts credited by admin."
+        },
+        "is_unlocked": {
+          "type": "boolean",
+          "description": "Whether account features are unlocked."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "balance_egp", "remaining_transactions", "is_unlocked", "updatedAt"]
+    },
+    "TopupRequest": {
+      "title": "Wallet Top-up Request",
+      "description": "Manual top-up request submitted by a user with requested attempts and transfer receipt image.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userDisplayName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "username": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 24,
+          "pattern": "^[a-z0-9_]{3,24}$"
+        },
+        "userEmail": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "requested_transactions": {
+          "type": "integer",
+          "description": "Requested number of transactions."
+        },
+        "calculated_amount_egp": {
+          "type": "integer",
+          "description": "Calculated EGP amount based on admin-configured transaction price."
+        },
+        "transfer_reference": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "receipt_image_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected"]
+        },
+        "approved_transactions": {
+          "type": "integer"
+        },
+        "approved_amount_egp": {
+          "type": "integer"
+        },
+        "admin_note": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "reviewed_by": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reviewedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "userDisplayName",
+        "username",
+        "userEmail",
+        "requested_transactions",
+        "calculated_amount_egp",
+        "receipt_image_url",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "WalletTransaction": {
+      "title": "Wallet Ledger Entry",
+      "description": "Append-only wallet credit/debit ledger record.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["credit", "debit"]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "amount_egp": {
+          "type": "integer"
+        },
+        "transactions_delta": {
+          "type": "integer"
+        },
+        "requestId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "createdBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "userId", "type", "title", "amount_egp", "transactions_delta", "createdBy", "createdAt"]
     }
   },
   "firestore": {
@@ -114,6 +314,22 @@
     "/usernames/{username}": {
       "schema": { "$ref": "#/entities/UsernameReservation" },
       "description": "Lowercase username reservations enforcing global uniqueness."
+    },
+    "/app_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/WalletSettings" },
+      "description": "Global wallet pricing settings managed by superuser admin."
+    },
+    "/wallets/{userId}": {
+      "schema": { "$ref": "#/entities/Wallet" },
+      "description": "Admin-managed wallet balances and unlocked transaction counts."
+    },
+    "/topup_requests/{requestId}": {
+      "schema": { "$ref": "#/entities/TopupRequest" },
+      "description": "User-submitted wallet top-up requests with transfer receipt images."
+    },
+    "/wallet_transactions/{txId}": {
+      "schema": { "$ref": "#/entities/WalletTransaction" },
+      "description": "Append-only wallet ledger entries created by superuser admin."
     }
   }
 }

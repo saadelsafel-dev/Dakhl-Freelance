@@ -34,6 +34,13 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'saadelsafel@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
     function isValidProfile(data, userId) {
       return data.keys().hasAll([
           'id',
@@ -99,9 +106,193 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidWalletSettings(data) {
+      return data.keys().hasAll(['transaction_price_egp', 'min_transactions', 'updatedBy', 'updatedAt'])
+        && data.keys().hasOnly(['transaction_price_egp', 'min_transactions', 'updatedBy', 'updatedAt'])
+        && data.transaction_price_egp is int
+        && data.transaction_price_egp >= 1
+        && data.transaction_price_egp <= 100000
+        && data.min_transactions is int
+        && data.min_transactions >= 1
+        && data.min_transactions <= 1000
+        && data.updatedBy is string
+        && isValidId(data.updatedBy)
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidWallet(data, userId) {
+      return data.keys().hasAll(['userId', 'balance_egp', 'remaining_transactions', 'is_unlocked', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'balance_egp', 'remaining_transactions', 'is_unlocked', 'updatedAt'])
+        && data.userId is string
+        && isValidId(data.userId)
+        && data.userId == userId
+        && data.balance_egp is int
+        && data.balance_egp >= 0
+        && data.balance_egp <= 10000000
+        && data.remaining_transactions is int
+        && data.remaining_transactions >= 0
+        && data.remaining_transactions <= 100000
+        && data.is_unlocked is bool
+        && data.updatedAt is timestamp;
+    }
+
+    function matchesConfiguredTopupPricing(data) {
+      return exists(/databases/$(database)/documents/app_settings/wallet)
+        ? (
+          data.requested_transactions >= get(/databases/$(database)/documents/app_settings/wallet).data.min_transactions
+          && data.calculated_amount_egp == data.requested_transactions * get(/databases/$(database)/documents/app_settings/wallet).data.transaction_price_egp
+        )
+        : (
+          data.requested_transactions >= 5
+          && data.calculated_amount_egp == data.requested_transactions * 20
+        );
+    }
+
+    function isValidTopupRequestCreate(data, requestId) {
+      return data.keys().hasAll([
+          'id',
+          'userId',
+          'userDisplayName',
+          'username',
+          'userEmail',
+          'requested_transactions',
+          'calculated_amount_egp',
+          'receipt_image_url',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'userId',
+          'userDisplayName',
+          'username',
+          'userEmail',
+          'requested_transactions',
+          'calculated_amount_egp',
+          'transfer_reference',
+          'receipt_image_url',
+          'status',
+          'approved_transactions',
+          'approved_amount_egp',
+          'admin_note',
+          'reviewed_by',
+          'createdAt',
+          'updatedAt',
+          'reviewedAt'
+        ])
+        && data.id is string
+        && isValidId(data.id)
+        && data.id == requestId
+        && data.userId is string
+        && isValidId(data.userId)
+        && data.userDisplayName is string
+        && data.userDisplayName.size() >= 2
+        && data.userDisplayName.size() <= 80
+        && isValidUsername(data.username)
+        && data.userEmail is string
+        && data.userEmail.size() >= 3
+        && data.userEmail.size() <= 160
+        && data.requested_transactions is int
+        && data.requested_transactions >= 1
+        && data.requested_transactions <= 1000
+        && data.calculated_amount_egp is int
+        && data.calculated_amount_egp >= 1
+        && data.calculated_amount_egp <= 100000000
+        && (!('transfer_reference' in data) || data.transfer_reference == null || (data.transfer_reference is string && data.transfer_reference.size() <= 120))
+        && data.receipt_image_url is string
+        && data.receipt_image_url.size() >= 1
+        && data.receipt_image_url.size() <= 300000
+        && data.status is string
+        && data.status == 'pending'
+        && (!('approved_transactions' in data) || data.approved_transactions == null)
+        && (!('approved_amount_egp' in data) || data.approved_amount_egp == null)
+        && (!('admin_note' in data) || data.admin_note == null)
+        && (!('reviewed_by' in data) || data.reviewed_by == null)
+        && (!('reviewedAt' in data) || data.reviewedAt == null)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTopupRequestUpdate(data, prev, requestId) {
+      return data.keys().hasAll([
+          'id',
+          'userId',
+          'userDisplayName',
+          'username',
+          'userEmail',
+          'requested_transactions',
+          'calculated_amount_egp',
+          'receipt_image_url',
+          'status',
+          'createdAt',
+          'updatedAt',
+          'reviewedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'userId',
+          'userDisplayName',
+          'username',
+          'userEmail',
+          'requested_transactions',
+          'calculated_amount_egp',
+          'transfer_reference',
+          'receipt_image_url',
+          'status',
+          'approved_transactions',
+          'approved_amount_egp',
+          'admin_note',
+          'reviewed_by',
+          'createdAt',
+          'updatedAt',
+          'reviewedAt'
+        ])
+        && data.id == requestId
+        && data.id == prev.id
+        && data.userId == prev.userId
+        && data.createdAt == prev.createdAt
+        && data.status is string
+        && data.status in ['approved', 'rejected']
+        && (!('approved_transactions' in data) || data.approved_transactions == null || (data.approved_transactions is int && data.approved_transactions >= 0 && data.approved_transactions <= 100000))
+        && (!('approved_amount_egp' in data) || data.approved_amount_egp == null || (data.approved_amount_egp is int && data.approved_amount_egp >= 0 && data.approved_amount_egp <= 10000000))
+        && (!('admin_note' in data) || data.admin_note == null || (data.admin_note is string && data.admin_note.size() <= 300))
+        && data.reviewed_by is string
+        && data.reviewed_by == request.auth.uid
+        && data.updatedAt is timestamp
+        && data.reviewedAt is timestamp;
+    }
+
+    function isValidWalletTransaction(data, txId) {
+      return data.keys().hasAll(['id', 'userId', 'type', 'title', 'amount_egp', 'transactions_delta', 'createdBy', 'createdAt'])
+        && data.keys().hasOnly(['id', 'userId', 'type', 'title', 'amount_egp', 'transactions_delta', 'requestId', 'createdBy', 'createdAt'])
+        && data.id is string
+        && isValidId(data.id)
+        && data.id == txId
+        && data.userId is string
+        && isValidId(data.userId)
+        && data.type is string
+        && data.type in ['credit', 'debit']
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 120
+        && data.amount_egp is int
+        && data.amount_egp >= 0
+        && data.amount_egp <= 10000000
+        && data.transactions_delta is int
+        && data.transactions_delta >= -100000
+        && data.transactions_delta <= 100000
+        && (!('requestId' in data) || data.requestId == null || (data.requestId is string && isValidId(data.requestId)))
+        && data.createdBy is string
+        && isValidId(data.createdBy)
+        && data.createdBy == request.auth.uid
+        && data.createdAt is timestamp;
+    }
+
     match /profiles/{userId} {
-      allow get: if isSignedIn() && isValidId(userId) && isOwner(userId);
-      allow list: if false;
+      allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
       allow create: if isVerifiedUser()
         && isValidId(userId)
         && isOwner(userId)
@@ -165,6 +356,99 @@ service cloud.firestore {
         && existing().userId == request.auth.uid
         && (!existsAfter(/databases/$(database)/documents/profiles/$(request.auth.uid))
           || getAfter(/databases/$(database)/documents/profiles/$(request.auth.uid)).data.username != username);
+    }
+
+    match /app_settings/{settingId} {
+      allow get: if isSignedIn() && isValidId(settingId) && settingId == 'wallet';
+      allow list: if false;
+      allow create: if isAdmin()
+        && isValidId(settingId)
+        && settingId == 'wallet'
+        && isValidWalletSettings(incoming())
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(settingId)
+        && settingId == 'wallet'
+        && isValidWalletSettings(incoming())
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'transaction_price_egp',
+          'min_transactions',
+          'updatedBy',
+          'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    match /wallets/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isAdmin()
+        && isValidId(userId)
+        && isValidWallet(incoming(), userId)
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(userId)
+        && isValidWallet(incoming(), userId)
+        && incoming().userId == existing().userId
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'balance_egp',
+          'remaining_transactions',
+          'is_unlocked',
+          'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    match /topup_requests/{requestId} {
+      allow get: if isSignedIn() && isValidId(requestId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (isAdmin() || resource.data.userId == request.auth.uid);
+      allow create: if isVerifiedUser()
+        && isValidId(requestId)
+        && isValidTopupRequestCreate(incoming(), requestId)
+        && incoming().userId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && matchesConfiguredTopupPricing(incoming());
+      allow update: if isAdmin()
+        && isValidId(requestId)
+        && existing().status == 'pending'
+        && isValidTopupRequestUpdate(incoming(), existing(), requestId)
+        && incoming().updatedAt == request.time
+        && incoming().reviewedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'status',
+          'approved_transactions',
+          'approved_amount_egp',
+          'admin_note',
+          'reviewed_by',
+          'updatedAt',
+          'reviewedAt'
+        ])
+        && (
+          incoming().status == 'rejected'
+          || (
+            incoming().status == 'approved'
+            && incoming().approved_transactions is int
+            && incoming().approved_transactions >= 1
+            && incoming().approved_amount_egp is int
+            && incoming().approved_amount_egp >= 0
+            && existsAfter(/databases/$(database)/documents/wallets/$(existing().userId))
+          )
+        );
+      allow delete: if false;
+    }
+
+    match /wallet_transactions/{txId} {
+      allow get: if isSignedIn() && isValidId(txId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (isAdmin() || resource.data.userId == request.auth.uid);
+      allow create: if isAdmin()
+        && isValidId(txId)
+        && isValidWalletTransaction(incoming(), txId)
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if false;
     }
   }
 }
