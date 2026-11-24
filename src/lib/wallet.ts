@@ -11,6 +11,7 @@ import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { db, handleFirestoreError, OperationType, storage } from "./firebase";
 import { parseGoogleDriveVideoUrl, sanitizeExternalHttpUrl } from "./media";
 import type {
+  ChatMessageRecord,
   ConnectionRequestRecord,
   ConnectionRequestStatus,
   DakhlProfile,
@@ -674,7 +675,9 @@ export function mapConnectionRequestDoc(
 export function mapNotificationDoc(id: string, data: Record<string, unknown>): NotificationRecord {
   const rawType = data.type;
   const type: NotificationType =
-    rawType === "request_accepted" || rawType === "request_declined"
+    rawType === "request_accepted" ||
+    rawType === "request_declined" ||
+    rawType === "chat_message"
       ? rawType
       : "client_request";
   return {
@@ -758,7 +761,8 @@ export async function respondToConnectionRequest(params: {
   request: ConnectionRequestRecord;
   responder: DakhlProfile;
   decision: "accepted" | "declined";
-}): Promise<void> {
+  isSuperUser?: boolean;
+}): Promise<{ deductedEgp: number; remainingTransactions: number | null }> {
   if (params.request.toUserId !== params.responder.id) {
     throw new Error("UNAUTHORIZED_REQUEST_RESPONSE");
   }
@@ -780,33 +784,137 @@ export async function respondToConnectionRequest(params: {
       ? `وافق ${responderName} (@${params.responder.username}) على طلب التواصل ويمكنكما الآن المتابعة في قسم الرسائل.`
       : `اعتذر ${responderName} (@${params.responder.username}) عن قبول طلب التواصل حاليًا.`;
 
-  const batch = writeBatch(db);
-  batch.update(doc(db, "connection_requests", params.request.id), {
-    status: params.decision,
-    updatedAt: serverTimestamp(),
-    respondedAt: serverTimestamp(),
-  });
+  const reqRef = doc(db, "connection_requests", params.request.id);
+  const notifRef = doc(db, "notifications", notifId);
+  const walletRef = doc(db, "wallets", params.responder.id);
+  const profileRef = doc(db, "profiles", params.responder.id);
+  const settingsRef = doc(db, "app_settings", "wallet");
 
-  batch.set(doc(db, "notifications", notifId), {
-    id: notifId,
-    userId: params.request.fromUserId,
-    actorUserId: params.responder.id,
-    actorDisplayName: responderName,
-    actorUsername: params.responder.username,
-    actorAccountType: responderType,
-    type: notifType,
-    title,
-    body: body.slice(0, 500),
-    requestId: params.request.id,
-    is_read: false,
-    createdAt: serverTimestamp(),
-  });
+  let deductedEgp = 0;
+  let remainingTransactions: number | null = null;
 
   try {
-    await batch.commit();
+    await runTransaction(db, async (transaction) => {
+      if (params.decision === "accepted") {
+        const [reqSnap, walletSnap, profileSnap, settingsSnap] = await Promise.all([
+          transaction.get(reqRef),
+          transaction.get(walletRef),
+          transaction.get(profileRef),
+          transaction.get(settingsRef),
+        ]);
+
+        if (!reqSnap.exists() || reqSnap.data().status !== "pending") {
+          throw new Error("REQUEST_ALREADY_RESPONDED");
+        }
+        if (reqSnap.data().toUserId !== params.responder.id) {
+          throw new Error("UNAUTHORIZED_REQUEST_RESPONSE");
+        }
+
+        const walletExists = walletSnap.exists();
+        const prevBalance =
+          walletExists && typeof walletSnap.data().balance_egp === "number"
+            ? Math.max(0, Math.trunc(walletSnap.data().balance_egp))
+            : 0;
+        const prevRemaining =
+          walletExists && typeof walletSnap.data().remaining_transactions === "number"
+            ? Math.max(0, Math.trunc(walletSnap.data().remaining_transactions))
+            : 0;
+
+        if (!params.isSuperUser && (!walletExists || prevRemaining < 1)) {
+          throw new Error("INSUFFICIENT_TRANSACTIONS");
+        }
+
+        if (walletExists && prevRemaining >= 1) {
+          const configuredPrice =
+            settingsSnap.exists() &&
+            typeof settingsSnap.data().transaction_price_egp === "number" &&
+            settingsSnap.data().transaction_price_egp >= 1
+              ? Math.trunc(settingsSnap.data().transaction_price_egp)
+              : DEFAULT_TRANSACTION_UNIT_PRICE_EGP;
+
+          deductedEgp = Math.min(prevBalance, configuredPrice);
+          const nextBalance = prevBalance - deductedEgp;
+          const nextRemaining = prevRemaining - 1;
+          const nextHasBalance = nextBalance > 0 || nextRemaining > 0;
+          remainingTransactions = nextRemaining;
+
+          transaction.update(walletRef, {
+            balance_egp: nextBalance,
+            remaining_transactions: nextRemaining,
+            is_unlocked: nextRemaining > 0,
+            updatedAt: serverTimestamp(),
+          });
+
+          const txId = `${params.request.id}_debit`;
+          const requesterLabel =
+            params.request.fromDisplayName.trim() || params.request.fromUsername || "العميل";
+          transaction.set(doc(db, "wallet_transactions", txId), {
+            id: txId,
+            userId: params.responder.id,
+            type: "debit",
+            title: `رسوم قبول طلب تواصل (${requesterLabel})`.slice(0, 120),
+            amount_egp: deductedEgp,
+            transactions_delta: -1,
+            requestId: params.request.id,
+            createdBy: params.responder.id,
+            createdAt: serverTimestamp(),
+          });
+
+          if (profileSnap.exists()) {
+            const isClientProfile = profileSnap.data().account_type === "client";
+            transaction.update(profileRef, {
+              has_balance: isClientProfile ? false : nextHasBalance,
+              wallet_priority: isClientProfile
+                ? 0
+                : computeWalletPriority(nextBalance, nextRemaining),
+              updatedAt: serverTimestamp(),
+            });
+          }
+        }
+      } else {
+        const reqSnap = await transaction.get(reqRef);
+        if (!reqSnap.exists() || reqSnap.data().status !== "pending") {
+          throw new Error("REQUEST_ALREADY_RESPONDED");
+        }
+        if (reqSnap.data().toUserId !== params.responder.id) {
+          throw new Error("UNAUTHORIZED_REQUEST_RESPONSE");
+        }
+      }
+
+      transaction.update(reqRef, {
+        status: params.decision,
+        updatedAt: serverTimestamp(),
+        respondedAt: serverTimestamp(),
+      });
+
+      transaction.set(notifRef, {
+        id: notifId,
+        userId: params.request.fromUserId,
+        actorUserId: params.responder.id,
+        actorDisplayName: responderName,
+        actorUsername: params.responder.username,
+        actorAccountType: responderType,
+        type: notifType,
+        title,
+        body: body.slice(0, 500),
+        requestId: params.request.id,
+        is_read: false,
+        createdAt: serverTimestamp(),
+      });
+    });
   } catch (error: unknown) {
+    if (
+      error instanceof Error &&
+      (error.message === "REQUEST_ALREADY_RESPONDED" ||
+        error.message === "UNAUTHORIZED_REQUEST_RESPONSE" ||
+        error.message === "INSUFFICIENT_TRANSACTIONS")
+    ) {
+      throw error;
+    }
     handleFirestoreError(error, OperationType.WRITE, `connection_requests/${params.request.id}`);
   }
+
+  return { deductedEgp, remainingTransactions };
 }
 
 export async function markNotificationRead(notifId: string): Promise<void> {
@@ -833,4 +941,76 @@ export async function markAllNotificationsRead(notifIds: string[]): Promise<void
   } catch (error: unknown) {
     handleFirestoreError(error, OperationType.WRITE, "notifications");
   }
+}
+
+export function mapChatMessageDoc(id: string, data: Record<string, unknown>): ChatMessageRecord {
+  return {
+    id: typeof data.id === "string" ? data.id : id,
+    requestId: typeof data.requestId === "string" ? data.requestId : "",
+    senderId: typeof data.senderId === "string" ? data.senderId : "",
+    recipientId: typeof data.recipientId === "string" ? data.recipientId : "",
+    senderDisplayName: typeof data.senderDisplayName === "string" ? data.senderDisplayName : "",
+    text: typeof data.text === "string" ? data.text : "",
+    createdAtMs: timestampToMillis(data.createdAt),
+  };
+}
+
+export async function sendChatMessage(params: {
+  requestId: string;
+  sender: DakhlProfile;
+  recipientId: string;
+  text: string;
+}): Promise<string> {
+  const cleanText = params.text.trim().slice(0, 1000);
+  if (!cleanText) {
+    throw new Error("EMPTY_MESSAGE");
+  }
+  if (!params.requestId || !params.recipientId || params.sender.id === params.recipientId) {
+    throw new Error("INVALID_CHAT_RECIPIENT");
+  }
+
+  const messageId = crypto.randomUUID();
+  const rawName = params.sender.display_name.trim() || params.sender.username || "عضو دخل";
+  const senderDisplayName = (rawName.length >= 2 ? rawName : "عضو دخل").slice(0, 80);
+  const senderType = params.sender.account_type === "client" ? "client" : "freelancer";
+  const title = `رسالة جديدة من ${senderDisplayName}`.slice(0, 120);
+  const body = cleanText.slice(0, 500);
+
+  const batch = writeBatch(db);
+  batch.set(doc(db, "connection_requests", params.requestId, "messages", messageId), {
+    id: messageId,
+    requestId: params.requestId,
+    senderId: params.sender.id,
+    recipientId: params.recipientId,
+    senderDisplayName,
+    participants: [params.sender.id, params.recipientId],
+    text: cleanText,
+    createdAt: serverTimestamp(),
+  });
+
+  batch.set(doc(db, "notifications", messageId), {
+    id: messageId,
+    userId: params.recipientId,
+    actorUserId: params.sender.id,
+    actorDisplayName: senderDisplayName,
+    actorUsername: params.sender.username,
+    actorAccountType: senderType,
+    type: "chat_message",
+    title,
+    body,
+    requestId: params.requestId,
+    is_read: false,
+    createdAt: serverTimestamp(),
+  });
+
+  try {
+    await batch.commit();
+  } catch (error: unknown) {
+    handleFirestoreError(
+      error,
+      OperationType.WRITE,
+      `connection_requests/${params.requestId}/messages/${messageId}`,
+    );
+  }
+  return messageId;
 }

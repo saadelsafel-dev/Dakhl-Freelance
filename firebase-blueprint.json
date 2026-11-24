@@ -466,7 +466,7 @@
         },
         "type": {
           "type": "string",
-          "enum": ["client_request", "request_accepted", "request_declined"]
+          "enum": ["client_request", "request_accepted", "request_declined", "chat_message"]
         },
         "title": {
           "type": "string",
@@ -505,6 +505,65 @@
         "is_read",
         "createdAt"
       ]
+    },
+    "ChatMessage": {
+      "title": "Chat Message",
+      "description": "Immutable real-time chat message between two participants of an accepted connection request.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "senderId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "recipientId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "senderDisplayName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "participants": {
+          "type": "array",
+          "description": "Exact pair [senderId, recipientId] used to enforce cost-safe array-contains queries."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "requestId",
+        "senderId",
+        "recipientId",
+        "senderDisplayName",
+        "participants",
+        "text",
+        "createdAt"
+      ]
     }
   },
   "firestore": {
@@ -522,7 +581,7 @@
     },
     "/wallets/{userId}": {
       "schema": { "$ref": "#/entities/Wallet" },
-      "description": "Admin-managed wallet balances and unlocked transaction counts."
+      "description": "Wallet balances and unlocked transaction counts; credited by admin and atomically debited when a recipient accepts a connection request."
     },
     "/topup_requests/{requestId}": {
       "schema": { "$ref": "#/entities/TopupRequest" },
@@ -530,11 +589,15 @@
     },
     "/wallet_transactions/{txId}": {
       "schema": { "$ref": "#/entities/WalletTransaction" },
-      "description": "Append-only wallet ledger entries created by superuser admin."
+      "description": "Append-only wallet ledger entries for admin credits and request-acceptance debits."
     },
     "/connection_requests/{requestId}": {
       "schema": { "$ref": "#/entities/ConnectionRequest" },
-      "description": "Client-to-freelancer contact requests with atomic notification creation and status replies."
+      "description": "Client-to-freelancer contact requests with atomic notification creation and atomic wallet debit on acceptance."
+    },
+    "/connection_requests/{requestId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Real-time chat messages strictly scoped to the two participants of an accepted connection request."
     },
     "/notifications/{notifId}": {
       "schema": { "$ref": "#/entities/UserNotification" },

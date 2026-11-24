@@ -100,7 +100,11 @@ export interface ConnectionRequestRecord {
   respondedAtMs: number | null;
 }
 
-export type NotificationType = "client_request" | "request_accepted" | "request_declined";
+export type NotificationType =
+  | "client_request"
+  | "request_accepted"
+  | "request_declined"
+  | "chat_message";
 
 export interface NotificationRecord {
   id: string;
@@ -114,5 +118,15 @@ export interface NotificationRecord {
   body: string;
   requestId: string;
   is_read: boolean;
+  createdAtMs: number;
+}
+
+export interface ChatMessageRecord {
+  id: string;
+  requestId: string;
+  senderId: string;
+  recipientId: string;
+  senderDisplayName: string;
+  text: string;
   createdAtMs: number;
 }

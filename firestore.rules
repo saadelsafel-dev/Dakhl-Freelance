@@ -211,6 +211,22 @@ service cloud.firestore {
         );
     }
 
+    function configuredTransactionPriceEgp() {
+      return exists(/databases/$(database)/documents/app_settings/wallet)
+        ? get(/databases/$(database)/documents/app_settings/wallet).data.transaction_price_egp
+        : 20;
+    }
+
+    function expectedPostDebitBalance(prevBalance) {
+      return prevBalance >= configuredTransactionPriceEgp()
+        ? prevBalance - configuredTransactionPriceEgp()
+        : 0;
+    }
+
+    function expectedWalletPriority(balanceEgp, remainingTx) {
+      return (balanceEgp > 10000000 ? 10000000 : balanceEgp) * 100 + (remainingTx > 99 ? 99 : remainingTx);
+    }
+
     function isValidTopupRequestCreate(data, requestId) {
       return data.keys().hasAll([
           'id',
@@ -455,7 +471,7 @@ service cloud.firestore {
         && data.actorAccountType is string
         && data.actorAccountType in ['freelancer', 'client']
         && data.type is string
-        && data.type in ['client_request', 'request_accepted', 'request_declined']
+        && data.type in ['client_request', 'request_accepted', 'request_declined', 'chat_message']
         && data.title is string
         && data.title.size() >= 2
         && data.title.size() <= 120
@@ -465,6 +481,51 @@ service cloud.firestore {
         && isValidId(data.requestId)
         && data.is_read is bool
         && data.is_read == false
+        && data.createdAt is timestamp;
+    }
+
+    function isValidChatMessageCreate(data, requestId, messageId) {
+      return data.keys().hasAll([
+          'id',
+          'requestId',
+          'senderId',
+          'recipientId',
+          'senderDisplayName',
+          'participants',
+          'text',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'requestId',
+          'senderId',
+          'recipientId',
+          'senderDisplayName',
+          'participants',
+          'text',
+          'createdAt'
+        ])
+        && data.id is string
+        && isValidId(data.id)
+        && data.id == messageId
+        && data.requestId is string
+        && isValidId(data.requestId)
+        && data.requestId == requestId
+        && data.senderId is string
+        && isValidId(data.senderId)
+        && data.senderId == request.auth.uid
+        && data.recipientId is string
+        && isValidId(data.recipientId)
+        && data.recipientId != request.auth.uid
+        && data.senderDisplayName is string
+        && data.senderDisplayName.size() >= 2
+        && data.senderDisplayName.size() <= 80
+        && data.participants is list
+        && data.participants.size() == 2
+        && data.participants.hasAll([data.senderId, data.recipientId])
+        && data.text is string
+        && data.text.size() >= 1
+        && data.text.size() <= 1000
         && data.createdAt is timestamp;
     }
 
@@ -574,6 +635,27 @@ service cloud.firestore {
                 ])
                 && incoming().account_type == 'freelancer'
               )
+              || (
+                isOwner(userId)
+                && (!('account_type' in existing()) || existing().account_type != 'client')
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'has_balance',
+                  'wallet_priority',
+                  'updatedAt'
+                ])
+                && existsAfter(/databases/$(database)/documents/wallets/$(userId))
+                && getAfter(/databases/$(database)/documents/wallets/$(userId)).data.updatedAt == request.time
+                && getAfter(/databases/$(database)/documents/wallets/$(userId)).data.remaining_transactions
+                   < get(/databases/$(database)/documents/wallets/$(userId)).data.remaining_transactions
+                && incoming().has_balance == (
+                  getAfter(/databases/$(database)/documents/wallets/$(userId)).data.balance_egp > 0
+                  || getAfter(/databases/$(database)/documents/wallets/$(userId)).data.remaining_transactions > 0
+                )
+                && incoming().wallet_priority == expectedWalletPriority(
+                  getAfter(/databases/$(database)/documents/wallets/$(userId)).data.balance_egp,
+                  getAfter(/databases/$(database)/documents/wallets/$(userId)).data.remaining_transactions
+                )
+              )
             )
           )
         );
@@ -628,7 +710,7 @@ service cloud.firestore {
         && isValidId(userId)
         && isValidWallet(incoming(), userId)
         && incoming().updatedAt == request.time;
-      allow update: if isAdmin()
+      allow update: if isVerifiedUser()
         && isValidId(userId)
         && isValidWallet(incoming(), userId)
         && incoming().userId == existing().userId
@@ -638,7 +720,21 @@ service cloud.firestore {
           'remaining_transactions',
           'is_unlocked',
           'updatedAt'
-        ]);
+        ])
+        && (
+          isAdmin()
+          || (
+            isOwner(userId)
+            && existing().remaining_transactions >= 1
+            && incoming().remaining_transactions == existing().remaining_transactions - 1
+            && incoming().is_unlocked == (incoming().remaining_transactions > 0)
+            && incoming().balance_egp == expectedPostDebitBalance(existing().balance_egp)
+            && (
+              !exists(/databases/$(database)/documents/profiles/$(userId))
+              || getAfter(/databases/$(database)/documents/profiles/$(userId)).data.updatedAt == request.time
+            )
+          )
+        );
       allow delete: if false;
     }
 
@@ -684,10 +780,33 @@ service cloud.firestore {
     match /wallet_transactions/{txId} {
       allow get: if isSignedIn() && isValidId(txId) && (existing().userId == request.auth.uid || isAdmin());
       allow list: if isSignedIn() && (isAdmin() || resource.data.userId == request.auth.uid);
-      allow create: if isAdmin()
+      allow create: if isVerifiedUser()
         && isValidId(txId)
         && isValidWalletTransaction(incoming(), txId)
-        && incoming().createdAt == request.time;
+        && incoming().createdAt == request.time
+        && (
+          isAdmin()
+          || (
+            incoming().userId == request.auth.uid
+            && incoming().type == 'debit'
+            && incoming().transactions_delta == -1
+            && incoming().requestId is string
+            && txId == incoming().requestId + '_debit'
+            && exists(/databases/$(database)/documents/wallets/$(request.auth.uid))
+            && existsAfter(/databases/$(database)/documents/wallets/$(request.auth.uid))
+            && getAfter(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.updatedAt == request.time
+            && getAfter(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.remaining_transactions
+               == get(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.remaining_transactions - 1
+            && incoming().amount_egp
+               == get(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.balance_egp
+                  - getAfter(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.balance_egp
+            && exists(/databases/$(database)/documents/connection_requests/$(incoming().requestId))
+            && get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.toUserId == request.auth.uid
+            && get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.status == 'pending'
+            && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.status == 'accepted'
+            && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.updatedAt == request.time
+          )
+        );
       allow update: if false;
       allow delete: if false;
     }
@@ -729,8 +848,56 @@ service cloud.firestore {
         && existsAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply'))
         && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply')).data.requestId == requestId
         && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply')).data.userId == existing().fromUserId
-        && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply')).data.actorUserId == request.auth.uid;
+        && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply')).data.actorUserId == request.auth.uid
+        && (
+          incoming().status == 'declined'
+          || isAdmin()
+          || (
+            incoming().status == 'accepted'
+            && existsAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit'))
+            && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit')).data.userId == request.auth.uid
+            && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit')).data.requestId == requestId
+            && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit')).data.type == 'debit'
+            && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit')).data.transactions_delta == -1
+          )
+        );
       allow delete: if false;
+
+      match /messages/{messageId} {
+        allow get: if isSignedIn() && isValidId(requestId) && isValidId(messageId) && (
+          existing().senderId == request.auth.uid
+          || existing().recipientId == request.auth.uid
+          || isAdmin()
+        );
+        allow list: if isSignedIn() && (
+          isAdmin()
+          || request.auth.uid in resource.data.participants
+        );
+        allow create: if isVerifiedUser()
+          && isValidId(requestId)
+          && isValidId(messageId)
+          && isValidChatMessageCreate(incoming(), requestId, messageId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/connection_requests/$(requestId))
+          && get(/databases/$(database)/documents/connection_requests/$(requestId)).data.status == 'accepted'
+          && (
+            (
+              get(/databases/$(database)/documents/connection_requests/$(requestId)).data.fromUserId == request.auth.uid
+              && get(/databases/$(database)/documents/connection_requests/$(requestId)).data.toUserId == incoming().recipientId
+            )
+            || (
+              get(/databases/$(database)/documents/connection_requests/$(requestId)).data.toUserId == request.auth.uid
+              && get(/databases/$(database)/documents/connection_requests/$(requestId)).data.fromUserId == incoming().recipientId
+            )
+          )
+          && existsAfter(/databases/$(database)/documents/notifications/$(messageId))
+          && getAfter(/databases/$(database)/documents/notifications/$(messageId)).data.requestId == requestId
+          && getAfter(/databases/$(database)/documents/notifications/$(messageId)).data.userId == incoming().recipientId
+          && getAfter(/databases/$(database)/documents/notifications/$(messageId)).data.actorUserId == request.auth.uid
+          && getAfter(/databases/$(database)/documents/notifications/$(messageId)).data.type == 'chat_message';
+        allow update: if false;
+        allow delete: if false;
+      }
     }
 
     match /notifications/{notifId} {
@@ -767,6 +934,25 @@ service cloud.firestore {
               || (incoming().type == 'request_declined'
                 && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.status == 'declined')
             )
+          )
+          || (
+            incoming().type == 'chat_message'
+            && notifId == incoming().id
+            && exists(/databases/$(database)/documents/connection_requests/$(incoming().requestId))
+            && get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.status == 'accepted'
+            && (
+              (
+                get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.fromUserId == request.auth.uid
+                && get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.toUserId == incoming().userId
+              )
+              || (
+                get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.toUserId == request.auth.uid
+                && get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.fromUserId == incoming().userId
+              )
+            )
+            && existsAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)/messages/$(notifId))
+            && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)/messages/$(notifId)).data.senderId == request.auth.uid
+            && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)/messages/$(notifId)).data.recipientId == incoming().userId
           )
         );
       allow update: if isVerifiedUser()

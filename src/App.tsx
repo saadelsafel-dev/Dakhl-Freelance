@@ -4,6 +4,7 @@ import logo from "./logo.png";
 import {
   ArrowDownLeft,
   ArrowLeft,
+  ArrowRight,
   ArrowUpLeft,
   Bell,
   BellRing,
@@ -52,6 +53,7 @@ import {
   computeWalletPriority,
   formatArabicDate,
   manualCreditWallet,
+  mapChatMessageDoc,
   mapConnectionRequestDoc,
   mapNotificationDoc,
   mapProfileDoc,
@@ -63,6 +65,7 @@ import {
   rejectTopupRequest,
   respondToConnectionRequest,
   saveWalletSettings,
+  sendChatMessage,
   sendClientConnectionRequest,
   submitTopupRequest,
   syncProfileBalanceVisibility,
@@ -71,6 +74,7 @@ import {
 } from "./lib/wallet";
 import type {
   AuthMeta,
+  ChatMessageRecord,
   ConnectionRequestRecord,
   ConnectionRequestStatus,
   DakhlProfile,
@@ -109,12 +113,18 @@ type Opportunity = {
 
 type ChatThread = {
   id: string;
+  partnerId: string;
+  partnerUsername: string;
   name: string;
   last: string;
   time: string;
+  lastMs: number;
   avatar: string;
   tone: string;
   initialMessage?: string;
+  initialMessageSenderId?: string;
+  initialTime?: string;
+  hasUnread?: boolean;
 };
 
 const DIRECTORY_CATEGORIES: { id: string; keywords: string[] }[] = [
@@ -181,9 +191,16 @@ function App({
   const [connectTarget, setConnectTarget] = useState<DakhlProfile | null>(null);
   const [saved, setSaved] = useState<string[]>([]);
   const [messageText, setMessageText] = useState("");
-  const [sentMessages, setSentMessages] = useState<string[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessageRecord[]>([]);
+  const [chatLoading, setChatLoading] = useState(false);
+  const [sendingMessage, setSendingMessage] = useState(false);
+  const [lastMessageByRequestId, setLastMessageByRequestId] = useState<
+    Record<string, { text: string; createdAtMs: number }>
+  >({});
   const [activeChat, setActiveChat] = useState<string | null>(null);
   const [toast, setToast] = useState("");
+  const effectiveSectionRef = useRef<Section>("home");
+  const effectiveActiveChatRef = useRef<string | null>(null);
 
   const [wallet, setWallet] = useState<WalletRecord>(() => mapWalletDoc(profile.id, undefined));
   const [walletSettings, setWalletSettings] = useState<WalletSettingsRecord>(() =>
@@ -331,6 +348,21 @@ function App({
         const items = snapshot.docs.map((d) => mapNotificationDoc(d.id, d.data()));
         items.sort((a, b) => b.createdAtMs - a.createdAtMs);
 
+        setLastMessageByRequestId((prev) => {
+          let changed = false;
+          const next = { ...prev };
+          for (const item of items) {
+            if (item.type === "chat_message" && item.requestId && item.body) {
+              const existing = next[item.requestId];
+              if (!existing || item.createdAtMs >= existing.createdAtMs) {
+                next[item.requestId] = { text: item.body, createdAtMs: item.createdAtMs };
+                changed = true;
+              }
+            }
+          }
+          return changed ? next : prev;
+        });
+
         if (!initialNotifLoadedRef.current) {
           for (const item of items) {
             seenNotifIdsRef.current[item.id] = true;
@@ -340,7 +372,11 @@ function App({
           for (const item of items) {
             if (!seenNotifIdsRef.current[item.id]) {
               seenNotifIdsRef.current[item.id] = true;
-              if (!item.is_read) {
+              const viewingSameChat =
+                item.type === "chat_message" &&
+                effectiveSectionRef.current === "messages" &&
+                effectiveActiveChatRef.current === item.requestId;
+              if (!item.is_read && !viewingSameChat) {
                 setToast(`إشعار جديد: ${item.title}`);
                 window.setTimeout(() => setToast(""), 4200);
                 if (
@@ -676,14 +712,10 @@ function App({
     setDialog("publish");
   };
 
-  const sendMessage = () => {
-    const text = messageText.trim();
-    if (!text || !activeChat) return;
-    setSentMessages((current) => [...current, text]);
-    setMessageText("");
-  };
-
   const unreadNotifCount = notifications.filter((item) => !item.is_read).length;
+  const unreadChatCount = notifications.filter(
+    (item) => !item.is_read && item.type === "chat_message",
+  ).length;
 
   const requestsById = useMemo(() => {
     const map: Record<string, ConnectionRequestRecord> = {};
@@ -709,30 +741,203 @@ function App({
   }, [outgoingRequests]);
 
   const acceptedThreads = useMemo<ChatThread[]>(() => {
+    const unreadChatIds: Record<string, boolean> = {};
+    const latestNotifMsgByRequestId: Record<string, { text: string; createdAtMs: number }> = {};
+    for (const n of notifications) {
+      if (n.type !== "chat_message" || !n.requestId) continue;
+      if (!n.is_read) {
+        unreadChatIds[n.requestId] = true;
+      }
+      const prevNotif = latestNotifMsgByRequestId[n.requestId];
+      if (!prevNotif || n.createdAtMs > prevNotif.createdAtMs) {
+        latestNotifMsgByRequestId[n.requestId] = {
+          text: n.body,
+          createdAtMs: n.createdAtMs,
+        };
+      }
+    }
+
     const combined = [...incomingRequests, ...outgoingRequests]
       .filter((req) => req.status === "accepted")
-      .sort((a, b) => (b.respondedAtMs ?? b.createdAtMs) - (a.respondedAtMs ?? a.createdAtMs));
+      .sort(
+        (a, b) =>
+          (b.respondedAtMs ?? b.createdAtMs) - (a.respondedAtMs ?? a.createdAtMs) ||
+          b.id.localeCompare(a.id),
+      );
 
     const seenPartners: Record<string, boolean> = {};
     const list: ChatThread[] = [];
     for (const req of combined) {
       const incoming = req.toUserId === profile.id;
       const partnerId = incoming ? req.fromUserId : req.toUserId;
-      if (seenPartners[partnerId]) continue;
+      if (!partnerId || seenPartners[partnerId]) continue;
       seenPartners[partnerId] = true;
       const partnerName = incoming ? req.fromDisplayName : req.toDisplayName;
+      const partnerUsername = incoming ? req.fromUsername : req.toUsername;
+      const baseMs = req.respondedAtMs ?? req.createdAtMs;
+      const fromActive = lastMessageByRequestId[req.id];
+      const fromNotif = latestNotifMsgByRequestId[req.id];
+      const latest =
+        fromActive && fromNotif
+          ? fromActive.createdAtMs >= fromNotif.createdAtMs
+            ? fromActive
+            : fromNotif
+          : fromActive ?? fromNotif;
+      const lastMs = latest && latest.createdAtMs >= baseMs ? latest.createdAtMs : baseMs;
+      const lastText =
+        latest && latest.createdAtMs >= baseMs
+          ? latest.text
+          : req.message || "تم قبول طلب التواصل";
       list.push({
         id: req.id,
+        partnerId,
+        partnerUsername,
         name: partnerName,
-        last: req.message || "تم قبول طلب التواصل",
-        time: formatArabicDate(req.respondedAtMs ?? req.createdAtMs),
+        last: lastText,
+        time: formatArabicDate(lastMs),
+        lastMs,
         avatar: getInitials(partnerName),
         tone: incoming ? "blue" : "rose",
         initialMessage: req.message || undefined,
+        initialMessageSenderId: req.fromUserId,
+        initialTime: formatArabicDate(req.createdAtMs),
+        hasUnread: Boolean(unreadChatIds[req.id]),
       });
     }
+    list.sort((a, b) => b.lastMs - a.lastMs || b.id.localeCompare(a.id));
     return list;
-  }, [incomingRequests, outgoingRequests, profile.id]);
+  }, [incomingRequests, outgoingRequests, profile.id, notifications, lastMessageByRequestId]);
+
+  const effectiveActiveChatId = useMemo(() => {
+    if (activeChat && acceptedThreads.some((thread) => thread.id === activeChat)) {
+      return activeChat;
+    }
+    return acceptedThreads[0]?.id ?? null;
+  }, [activeChat, acceptedThreads]);
+
+  const activeThread = useMemo(
+    () => acceptedThreads.find((thread) => thread.id === effectiveActiveChatId) ?? null,
+    [acceptedThreads, effectiveActiveChatId],
+  );
+
+  const pendingAdminCount = adminRequests.filter((req) => req.status === "pending").length;
+  const effectiveSection: Section = isLocked ? "wallet" : section;
+
+  useEffect(() => {
+    effectiveSectionRef.current = effectiveSection;
+    effectiveActiveChatRef.current = effectiveActiveChatId;
+  }, [effectiveSection, effectiveActiveChatId]);
+
+  useEffect(() => {
+    if (!effectiveActiveChatId) {
+      setChatMessages([]);
+      setChatLoading(false);
+      return;
+    }
+
+    setChatLoading(true);
+    const messagesQuery = query(
+      collection(db, "connection_requests", effectiveActiveChatId, "messages"),
+      where("participants", "array-contains", profile.id),
+    );
+    const unsubMessages = onSnapshot(
+      messagesQuery,
+      (snapshot) => {
+        const list = snapshot.docs.map((d) => {
+          const mapped = mapChatMessageDoc(d.id, d.data());
+          if (mapped.createdAtMs === 0 && d.metadata.hasPendingWrites) {
+            mapped.createdAtMs = Date.now();
+          }
+          return mapped;
+        });
+        list.sort((a, b) => a.createdAtMs - b.createdAtMs || a.id.localeCompare(b.id));
+        setChatMessages(list);
+        setChatLoading(false);
+        const lastMsg = list[list.length - 1];
+        if (lastMsg) {
+          setLastMessageByRequestId((prev) => {
+            const current = prev[effectiveActiveChatId];
+            if (
+              current &&
+              current.text === lastMsg.text &&
+              current.createdAtMs === lastMsg.createdAtMs
+            ) {
+              return prev;
+            }
+            return {
+              ...prev,
+              [effectiveActiveChatId]: {
+                text: lastMsg.text,
+                createdAtMs: lastMsg.createdAtMs,
+              },
+            };
+          });
+        }
+      },
+      (error) => {
+        setChatLoading(false);
+        if (!auth.currentUser) return;
+        try {
+          handleFirestoreError(
+            error,
+            OperationType.LIST,
+            `connection_requests/${effectiveActiveChatId}/messages`,
+          );
+        } catch (wrapped: unknown) {
+          if (wrapped instanceof Error) setFatalError(wrapped);
+        }
+      },
+    );
+
+    return () => unsubMessages();
+  }, [effectiveActiveChatId, profile.id]);
+
+  useEffect(() => {
+    if (effectiveSection !== "messages" || !effectiveActiveChatId) return;
+    const unreadIds = notifications
+      .filter(
+        (n) => !n.is_read && n.type === "chat_message" && n.requestId === effectiveActiveChatId,
+      )
+      .map((n) => n.id);
+    if (unreadIds.length > 0) {
+      void markAllNotificationsRead(unreadIds).catch(() => {});
+    }
+  }, [effectiveSection, effectiveActiveChatId, notifications]);
+
+  const sendMessage = async () => {
+    const text = messageText.trim();
+    if (!text || !activeThread || sendingMessage) return;
+
+    setSendingMessage(true);
+    setMessageText("");
+    try {
+      await sendChatMessage({
+        requestId: activeThread.id,
+        sender: profile,
+        recipientId: activeThread.partnerId,
+        text,
+      });
+    } catch (error: unknown) {
+      setMessageText(text);
+      if (error instanceof Error && error.message === "EMPTY_MESSAGE") {
+        showToast("اكتب رسالة قبل الإرسال.");
+      } else if (error instanceof Error) {
+        setFatalError(error);
+      }
+    } finally {
+      setSendingMessage(false);
+    }
+  };
+
+  const openChatThread = (requestId?: string, partnerId?: string) => {
+    if (requestId && acceptedThreads.some((t) => t.id === requestId)) {
+      setActiveChat(requestId);
+    } else if (partnerId) {
+      const match = acceptedThreads.find((t) => t.partnerId === partnerId);
+      if (match) setActiveChat(match.id);
+    }
+    navigateTo("messages");
+  };
 
   const handleMarkNotifRead = async (notifId: string) => {
     try {
@@ -760,22 +965,33 @@ function App({
   ) => {
     setRespondingRequestId(request.id);
     try {
-      await respondToConnectionRequest({
+      const result = await respondToConnectionRequest({
         request,
         responder: profile,
         decision,
+        isSuperUser,
       });
       if (relatedNotifId) {
         void markNotificationRead(relatedNotifId).catch(() => {});
       }
-      showToast(
-        decision === "accepted"
-          ? `تم قبول طلب ${request.fromDisplayName} وإرسال إشعار له — يمكنكما المتابعة في «الرسائل».`
-          : `تم رفض طلب ${request.fromDisplayName} وإبلاغه بذلك.`,
-      );
+      if (decision === "accepted") {
+        if (result.remainingTransactions !== null) {
+          showToast(
+            `تم قبول طلب ${request.fromDisplayName} وخصم ${formatArabicNumber(result.deductedEgp)} ج.م (معاملة واحدة) — المتبقي: ${formatArabicNumber(result.remainingTransactions)}.`,
+          );
+        } else {
+          showToast(
+            `تم قبول طلب ${request.fromDisplayName} وإرسال إشعار له — يمكنكما المتابعة في «الرسائل».`,
+          );
+        }
+      } else {
+        showToast(`تم رفض طلب ${request.fromDisplayName} وإبلاغه بذلك.`);
+      }
     } catch (error: unknown) {
       if (error instanceof Error && error.message === "REQUEST_ALREADY_RESPONDED") {
         showToast("تم الرد على هذا الطلب مسبقًا.");
+      } else if (error instanceof Error && error.message === "INSUFFICIENT_TRANSACTIONS") {
+        showToast("رصيد المعاملات غير كافٍ — يرجى شحن المحفظة أولًا لقبول الطلب.");
       } else if (error instanceof Error) {
         setFatalError(error);
       }
@@ -801,9 +1017,6 @@ function App({
       showToast("تعذّر طلب إذن تنبيهات المتصفح.");
     }
   };
-
-  const pendingAdminCount = adminRequests.filter((req) => req.status === "pending").length;
-  const effectiveSection: Section = isLocked ? "wallet" : section;
 
   return (
     <div className="app-shell">
@@ -884,7 +1097,14 @@ function App({
                             void handleMarkNotifRead(notif.id);
                           }
                           setNotifPopoverOpen(false);
-                          navigateTo("notifications");
+                          if (
+                            (notif.type === "chat_message" || notif.type === "request_accepted") &&
+                            notif.requestId
+                          ) {
+                            openChatThread(notif.requestId);
+                          } else {
+                            navigateTo("notifications");
+                          }
                         }}
                       >
                         <div className="notif-popover-item-title">
@@ -977,6 +1197,21 @@ function App({
                   <Icon size={19} strokeWidth={1.8} />
                   <span>{item.label}</span>
                   {itemLocked && <Lock size={14} style={{ marginRight: "auto", opacity: 0.65 }} />}
+                  {!itemLocked && item.id === "messages" && unreadChatCount > 0 && (
+                    <span
+                      style={{
+                        marginRight: "auto",
+                        background: "#244e41",
+                        color: "#ffffff",
+                        borderRadius: 99,
+                        padding: "1px 7px",
+                        fontSize: 10,
+                        fontWeight: 700,
+                      }}
+                    >
+                      {formatArabicNumber(unreadChatCount)}
+                    </span>
+                  )}
                   {!itemLocked && item.id === "notifications" && unreadNotifCount > 0 && (
                     <span
                       style={{
@@ -1063,7 +1298,7 @@ function App({
                   outgoingStatusByTarget={outgoingStatusByTarget}
                   setSection={navigateTo}
                   onConnect={(member) => openConnection(member)}
-                  onOpenMessages={() => navigateTo("messages")}
+                  onOpenMessages={(partnerId?: string) => openChatThread(undefined, partnerId)}
                   onPreviewProfile={setPreviewProfile}
                   saved={saved}
                   setSaved={setSaved}
@@ -1081,7 +1316,7 @@ function App({
                   setSearch={setSearch}
                   outgoingStatusByTarget={outgoingStatusByTarget}
                   onConnect={(member) => openConnection(member)}
-                  onOpenMessages={() => navigateTo("messages")}
+                  onOpenMessages={(partnerId?: string) => openChatThread(undefined, partnerId)}
                   onPreviewProfile={setPreviewProfile}
                   saved={saved}
                   setSaved={setSaved}
@@ -1092,13 +1327,16 @@ function App({
               )}
               {effectiveSection === "messages" && (
                 <MessagesContent
+                  currentUserId={profile.id}
                   chats={acceptedThreads}
-                  activeChat={activeChat}
+                  activeChat={effectiveActiveChatId}
                   setActiveChat={setActiveChat}
+                  messages={chatMessages}
+                  loadingMessages={chatLoading}
                   messageText={messageText}
                   setMessageText={setMessageText}
-                  sentMessages={sentMessages}
-                  onSend={sendMessage}
+                  sendingMessage={sendingMessage}
+                  onSend={() => void sendMessage()}
                 />
               )}
               {effectiveSection === "assign" && (
@@ -1113,7 +1351,7 @@ function App({
                   saved={saved}
                   setSaved={setSaved}
                   onConnect={(member) => openConnection(member)}
-                  onOpenMessages={() => navigateTo("messages")}
+                  onOpenMessages={(partnerId?: string) => openChatThread(undefined, partnerId)}
                   onPreviewProfile={setPreviewProfile}
                   onOpenManualCredit={setManualCreditTarget}
                 />
@@ -1132,7 +1370,7 @@ function App({
                     void handleRespondRequest(req, decision, notifId)
                   }
                   onOpenAssign={() => navigateTo("assign")}
-                  onOpenMessages={() => navigateTo("messages")}
+                  onOpenMessages={(reqId?: string) => openChatThread(reqId)}
                 />
               )}
               {effectiveSection === "wallet" && (
@@ -1259,9 +1497,11 @@ function App({
             >
               <span className="mobile-nav-icon-wrap">
                 {itemLocked ? <Lock size={18} /> : <Icon size={20} />}
-                {!itemLocked && item.id === "notifications" && unreadNotifCount > 0 && (
-                  <span className="mobile-nav-dot" />
-                )}
+                {!itemLocked &&
+                  ((item.id === "notifications" && unreadNotifCount > 0) ||
+                    (item.id === "messages" && unreadChatCount > 0)) && (
+                    <span className="mobile-nav-dot" />
+                  )}
               </span>
               <span>
                 {item.label === "اكتشف أشخاصًا"
@@ -1428,8 +1668,9 @@ function App({
             openConnection(member);
           }}
           onOpenMessages={() => {
+            const partnerId = previewProfile.id;
             setPreviewProfile(null);
-            navigateTo("messages");
+            openChatThread(undefined, partnerId);
           }}
           onPreviewImage={(url, title) => setLightboxImage({ url, title })}
         />
@@ -1455,7 +1696,7 @@ function HomeContent(props: {
   outgoingStatusByTarget: Record<string, ConnectionRequestStatus>;
   setSection: (section: Section) => void;
   onConnect: (member: DakhlProfile) => void;
-  onOpenMessages: () => void;
+  onOpenMessages: (partnerId?: string) => void;
   onPreviewProfile: (member: DakhlProfile) => void;
   saved: string[];
   setSaved: (value: string[] | ((current: string[]) => string[])) => void;
@@ -1608,7 +1849,7 @@ function DiscoverContent(props: {
   setSearch: (value: string) => void;
   outgoingStatusByTarget: Record<string, ConnectionRequestStatus>;
   onConnect: (member: DakhlProfile) => void;
-  onOpenMessages: () => void;
+  onOpenMessages: (partnerId?: string) => void;
   onPreviewProfile: (member: DakhlProfile) => void;
   saved: string[];
   setSaved: (value: string[] | ((current: string[]) => string[])) => void;
@@ -1684,7 +1925,7 @@ function MemberDirectoryCard({
   saved: boolean;
   onToggleSave: () => void;
   onConnect: (member: DakhlProfile) => void;
-  onOpenMessages: () => void;
+  onOpenMessages: (partnerId?: string) => void;
   onPreviewProfile: (member: DakhlProfile) => void;
 }) {
   const locationText = [member.city, member.governorate].filter(Boolean).join("، ") || "غير محدد";
@@ -1748,7 +1989,7 @@ function MemberDirectoryCard({
           <button
             type="button"
             className="connect-button"
-            onClick={onOpenMessages}
+            onClick={() => onOpenMessages(member.id)}
           >
             تم القبول · المحادثات <ArrowLeft size={14} />
           </button>
@@ -1791,7 +2032,7 @@ function AssignContent({
   saved: string[];
   setSaved: (value: string[] | ((current: string[]) => string[])) => void;
   onConnect: (member: DakhlProfile) => void;
-  onOpenMessages: () => void;
+  onOpenMessages: (partnerId?: string) => void;
   onPreviewProfile: (member: DakhlProfile) => void;
   onOpenManualCredit: (target: DakhlProfile) => void;
 }) {
@@ -1950,7 +2191,7 @@ function AssignContent({
                       <button
                         type="button"
                         className="connect-button"
-                        onClick={onOpenMessages}
+                        onClick={() => onOpenMessages(member.id)}
                       >
                         تم القبول · المحادثات <ArrowLeft size={14} />
                       </button>
@@ -2055,35 +2296,59 @@ function OpportunityRow({
   );
 }
 
+function formatChatClock(ms: number) {
+  if (!ms || ms <= 0) return "الآن";
+  return new Intl.DateTimeFormat("ar-EG", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(ms));
+}
+
 function MessagesContent(props: {
+  currentUserId: string;
   chats: ChatThread[];
   activeChat: string | null;
   setActiveChat: (id: string) => void;
+  messages: ChatMessageRecord[];
+  loadingMessages: boolean;
   messageText: string;
   setMessageText: (value: string) => void;
-  sentMessages: string[];
+  sendingMessage: boolean;
   onSend: () => void;
 }) {
+  const [mobileListOpen, setMobileListOpen] = useState(false);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const currentThread =
     props.chats.find((chat) => chat.id === props.activeChat) ?? props.chats[0] ?? null;
 
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [currentThread?.id, props.messages.length]);
+
   return (
-    <section className="messages-panel">
+    <section className={`messages-panel ${mobileListOpen ? "mobile-list-open" : ""}`}>
       <div className="chat-list">
         <div className="chat-list-title">
-          <h3>المحادثات</h3>
+          <h3>المحادثات ({formatArabicNumber(props.chats.length)})</h3>
         </div>
         {props.chats.length > 0 ? (
           props.chats.map((chat) => (
             <button
               key={chat.id}
-              onClick={() => props.setActiveChat(chat.id)}
+              type="button"
+              onClick={() => {
+                props.setActiveChat(chat.id);
+                setMobileListOpen(false);
+              }}
               className={`chat-preview ${currentThread?.id === chat.id ? "current" : ""}`}
             >
               <div className={`person-avatar small ${chat.tone}`}>{chat.avatar}</div>
               <div className="chat-preview-copy">
                 <div>
                   <strong>{chat.name}</strong>
+                  {chat.hasUnread && <span className="chat-unread-dot" aria-label="رسالة جديدة" />}
                   <time>{chat.time}</time>
                 </div>
                 <p>{chat.last}</p>
@@ -2100,43 +2365,90 @@ function MessagesContent(props: {
         {currentThread ? (
           <>
             <div className="chat-header">
+              <button
+                type="button"
+                className="chat-back-btn"
+                onClick={() => setMobileListOpen(true)}
+                aria-label="عرض قائمة المحادثات"
+              >
+                <ArrowRight size={14} /> المحادثات
+              </button>
               <div className={`person-avatar small ${currentThread.tone}`}>{currentThread.avatar}</div>
-              <div>
+              <div className="chat-header-copy">
                 <strong>{currentThread.name}</strong>
-                <span>متصل عبر قبول طلب التواصل</span>
+                <span>
+                  <span dir="ltr">@{currentThread.partnerUsername}</span> · متصل عبر قبول طلب التواصل
+                </span>
               </div>
             </div>
-            <div className="chat-notice">
-              <Check size={13} />
-              تم قبول طلب التواصل — يمكنكما متابعة تفاصيل الاتفاق هنا.
+
+            <div className="chat-messages-scroll" ref={scrollContainerRef}>
+              <div className="chat-notice">
+                <Check size={13} />
+                تم قبول طلب التواصل — كل الرسائل هنا محفوظة وتصل للطرفين مباشرة.
+              </div>
+              {currentThread.initialMessage && (
+                <div
+                  className={`chat-bubble ${
+                    currentThread.initialMessageSenderId === props.currentUserId
+                      ? "sent"
+                      : "received"
+                  }`}
+                >
+                  {currentThread.initialMessage}
+                  <time>
+                    {currentThread.initialTime ?? currentThread.time}
+                    {currentThread.initialMessageSenderId === props.currentUserId && (
+                      <Check size={12} />
+                    )}
+                  </time>
+                </div>
+              )}
+              {props.loadingMessages && props.messages.length === 0 ? (
+                <div className="chat-date">جارٍ تحميل الرسائل...</div>
+              ) : (
+                props.messages.map((msg) => {
+                  const isMine = msg.senderId === props.currentUserId;
+                  return (
+                    <div key={msg.id} className={`chat-bubble ${isMine ? "sent" : "received"}`}>
+                      {msg.text}
+                      <time>
+                        {formatChatClock(msg.createdAtMs)}
+                        {isMine && <CheckCheck size={12} />}
+                      </time>
+                    </div>
+                  );
+                })
+              )}
             </div>
-            {currentThread.initialMessage && (
-              <div className="chat-bubble received">
-                {currentThread.initialMessage}
-                <time>{currentThread.time}</time>
-              </div>
-            )}
-            {props.sentMessages.map((message, index) => (
-              <div key={`${message}-${index}`} className="chat-bubble sent">
-                {message}
-                <time>
-                  الآن <Check size={12} />
-                </time>
-              </div>
-            ))}
-            <div className="chat-compose">
+
+            <form
+              className="chat-compose"
+              onSubmit={(event) => {
+                event.preventDefault();
+                props.onSend();
+              }}
+            >
               <input
                 value={props.messageText}
+                maxLength={1000}
+                disabled={props.sendingMessage}
                 onChange={(event) => props.setMessageText(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") props.onSend();
-                }}
-                placeholder="اكتب رسالة..."
+                placeholder={`اكتب رسالة إلى ${currentThread.name}...`}
               />
-              <button className="send-button" onClick={props.onSend} aria-label="إرسال">
-                <Send size={17} />
+              <button
+                type="submit"
+                className="send-button"
+                disabled={props.sendingMessage || !props.messageText.trim()}
+                aria-label="إرسال"
+              >
+                {props.sendingMessage ? (
+                  <LoaderCircle className="spin" size={16} />
+                ) : (
+                  <Send size={17} />
+                )}
               </button>
-            </div>
+            </form>
           </>
         ) : (
           <div className="empty-state" style={{ margin: "auto 0" }}>
@@ -2175,7 +2487,7 @@ function NotificationsContent({
     relatedNotifId?: string,
   ) => void;
   onOpenAssign: () => void;
-  onOpenMessages: () => void;
+  onOpenMessages: (requestId?: string) => void;
 }) {
   const [filter, setFilter] = useState<"all" | "unread" | "requests">("all");
   const unreadCount = notifications.filter((n) => !n.is_read).length;
@@ -2313,6 +2625,7 @@ function NotificationsContent({
                           type="button"
                           className="primary-button"
                           disabled={isBusy}
+                          title="قبول الطلب وخصم معاملة واحدة من رصيد المحفظة"
                           style={{ padding: "7px 12px", fontSize: 11 }}
                           onClick={() => onRespondRequest(relatedRequest, "accepted", notif.id)}
                         >
@@ -2321,7 +2634,7 @@ function NotificationsContent({
                           ) : (
                             <Check size={13} />
                           )}
-                          قبول الطلب
+                          قبول الطلب (خصم معاملة)
                         </button>
                         <button
                           type="button"
@@ -2340,9 +2653,9 @@ function NotificationsContent({
                         type="button"
                         className="connect-button"
                         style={{ fontSize: 11 }}
-                        onClick={onOpenMessages}
+                        onClick={() => onOpenMessages(relatedRequest.id)}
                       >
-                        فتح المحادثات <ArrowLeft size={13} />
+                        فتح المحادثة <ArrowLeft size={13} />
                       </button>
                     )}
 
