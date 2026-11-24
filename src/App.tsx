@@ -4413,8 +4413,8 @@ function ProfileContent({
       resetProjectDraft();
       setAddingProject(false);
       onNotify("تمت إضافة المشروع إلى ملفك الشخصي.");
-    } catch (error: unknown) {
-      if (error instanceof Error) onFatalError(error);
+    } catch {
+      setProjError("تعذر حفظ المشروع. لم تُحفظ البيانات؛ حاول مرة أخرى.");
     } finally {
       setProjBusy(false);
     }
@@ -4518,8 +4518,8 @@ function ProfileContent({
     } catch (error: unknown) {
       if (error instanceof Error && error.message === "INVALID_PORTFOLIO_URL") {
         setEditError("أدخل رابط بورتفوليو صحيحًا.");
-      } else if (error instanceof Error) {
-        onFatalError(error);
+      } else {
+        setEditError("تعذر حفظ التعديلات. لم تُحفظ البيانات؛ حاول مرة أخرى.");
       }
     } finally {
       setSaving(false);
