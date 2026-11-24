@@ -5,13 +5,18 @@ import {
   setDoc,
   Timestamp,
   updateDoc,
+  writeBatch,
 } from "firebase/firestore";
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { db, handleFirestoreError, OperationType, storage } from "./firebase";
 import { parseGoogleDriveVideoUrl, sanitizeExternalHttpUrl } from "./media";
 import type {
+  ConnectionRequestRecord,
+  ConnectionRequestStatus,
   DakhlProfile,
   ExperienceLevel,
+  NotificationRecord,
+  NotificationType,
   PortfolioProject,
   TopupRequestRecord,
   WalletRecord,
@@ -613,4 +618,191 @@ export function mapWalletDoc(userId: string, data: Record<string, unknown> | und
     is_unlocked: Boolean(data.is_unlocked) && remaining > 0,
     updatedAtMs: timestampToMillis(data.updatedAt),
   };
+}
+
+export function mapConnectionRequestDoc(
+  id: string,
+  data: Record<string, unknown>,
+): ConnectionRequestRecord {
+  const statusRaw = data.status;
+  const status: ConnectionRequestStatus =
+    statusRaw === "accepted" || statusRaw === "declined" ? statusRaw : "pending";
+  return {
+    id: typeof data.id === "string" ? data.id : id,
+    fromUserId: typeof data.fromUserId === "string" ? data.fromUserId : "",
+    fromDisplayName: typeof data.fromDisplayName === "string" ? data.fromDisplayName : "",
+    fromUsername: typeof data.fromUsername === "string" ? data.fromUsername : "",
+    fromAccountType: data.fromAccountType === "client" ? "client" : "freelancer",
+    toUserId: typeof data.toUserId === "string" ? data.toUserId : "",
+    toDisplayName: typeof data.toDisplayName === "string" ? data.toDisplayName : "",
+    toUsername: typeof data.toUsername === "string" ? data.toUsername : "",
+    message: typeof data.message === "string" ? data.message : "",
+    status,
+    createdAtMs: timestampToMillis(data.createdAt),
+    respondedAtMs: data.respondedAt ? timestampToMillis(data.respondedAt) : null,
+  };
+}
+
+export function mapNotificationDoc(id: string, data: Record<string, unknown>): NotificationRecord {
+  const rawType = data.type;
+  const type: NotificationType =
+    rawType === "request_accepted" || rawType === "request_declined"
+      ? rawType
+      : "client_request";
+  return {
+    id: typeof data.id === "string" ? data.id : id,
+    userId: typeof data.userId === "string" ? data.userId : "",
+    actorUserId: typeof data.actorUserId === "string" ? data.actorUserId : "",
+    actorDisplayName: typeof data.actorDisplayName === "string" ? data.actorDisplayName : "",
+    actorUsername: typeof data.actorUsername === "string" ? data.actorUsername : "",
+    actorAccountType: data.actorAccountType === "client" ? "client" : "freelancer",
+    type,
+    title: typeof data.title === "string" ? data.title : "",
+    body: typeof data.body === "string" ? data.body : "",
+    requestId: typeof data.requestId === "string" ? data.requestId : "",
+    is_read: Boolean(data.is_read),
+    createdAtMs: timestampToMillis(data.createdAt),
+  };
+}
+
+export async function sendClientConnectionRequest(params: {
+  sender: DakhlProfile;
+  target: DakhlProfile;
+  message: string;
+}): Promise<string> {
+  if (params.sender.id === params.target.id) {
+    throw new Error("CANNOT_CONTACT_SELF");
+  }
+
+  const requestId = crypto.randomUUID();
+  const cleanMessage = params.message.trim().slice(0, 500);
+  const fromType = params.sender.account_type === "client" ? "client" : "freelancer";
+  const fromDisplayName = params.sender.display_name.trim().slice(0, 80);
+  const toDisplayName = params.target.display_name.trim().slice(0, 80);
+  const senderRoleLabel = fromType === "client" ? "العميل" : "العضو";
+  const title = `طلب تواصل جديد من ${senderRoleLabel} ${fromDisplayName}`.slice(0, 120);
+  const body = (
+    cleanMessage ||
+    `يرغب ${senderRoleLabel} ${fromDisplayName} (@${params.sender.username}) في التواصل معك حول مشروع.`
+  ).slice(0, 500);
+
+  const batch = writeBatch(db);
+  batch.set(doc(db, "connection_requests", requestId), {
+    id: requestId,
+    fromUserId: params.sender.id,
+    fromDisplayName,
+    fromUsername: params.sender.username,
+    fromAccountType: fromType,
+    toUserId: params.target.id,
+    toDisplayName,
+    toUsername: params.target.username,
+    message: cleanMessage,
+    status: "pending",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    respondedAt: null,
+  });
+
+  batch.set(doc(db, "notifications", requestId), {
+    id: requestId,
+    userId: params.target.id,
+    actorUserId: params.sender.id,
+    actorDisplayName: fromDisplayName,
+    actorUsername: params.sender.username,
+    actorAccountType: fromType,
+    type: "client_request",
+    title,
+    body,
+    requestId,
+    is_read: false,
+    createdAt: serverTimestamp(),
+  });
+
+  try {
+    await batch.commit();
+  } catch (error: unknown) {
+    handleFirestoreError(error, OperationType.WRITE, `connection_requests/${requestId}`);
+  }
+  return requestId;
+}
+
+export async function respondToConnectionRequest(params: {
+  request: ConnectionRequestRecord;
+  responder: DakhlProfile;
+  decision: "accepted" | "declined";
+}): Promise<void> {
+  if (params.request.toUserId !== params.responder.id) {
+    throw new Error("UNAUTHORIZED_REQUEST_RESPONSE");
+  }
+  if (params.request.status !== "pending") {
+    throw new Error("REQUEST_ALREADY_RESPONDED");
+  }
+
+  const notifId = `${params.request.id}_reply`;
+  const responderType = params.responder.account_type === "client" ? "client" : "freelancer";
+  const responderName = params.responder.display_name.trim().slice(0, 80);
+  const notifType: NotificationType =
+    params.decision === "accepted" ? "request_accepted" : "request_declined";
+  const title =
+    params.decision === "accepted"
+      ? `قبل ${responderName} طلب التواصل`.slice(0, 120)
+      : `اعتذر ${responderName} عن طلب التواصل`.slice(0, 120);
+  const body =
+    params.decision === "accepted"
+      ? `وافق ${responderName} (@${params.responder.username}) على طلب التواصل ويمكنكما الآن المتابعة في قسم الرسائل.`
+      : `اعتذر ${responderName} (@${params.responder.username}) عن قبول طلب التواصل حاليًا.`;
+
+  const batch = writeBatch(db);
+  batch.update(doc(db, "connection_requests", params.request.id), {
+    status: params.decision,
+    updatedAt: serverTimestamp(),
+    respondedAt: serverTimestamp(),
+  });
+
+  batch.set(doc(db, "notifications", notifId), {
+    id: notifId,
+    userId: params.request.fromUserId,
+    actorUserId: params.responder.id,
+    actorDisplayName: responderName,
+    actorUsername: params.responder.username,
+    actorAccountType: responderType,
+    type: notifType,
+    title,
+    body: body.slice(0, 500),
+    requestId: params.request.id,
+    is_read: false,
+    createdAt: serverTimestamp(),
+  });
+
+  try {
+    await batch.commit();
+  } catch (error: unknown) {
+    handleFirestoreError(error, OperationType.WRITE, `connection_requests/${params.request.id}`);
+  }
+}
+
+export async function markNotificationRead(notifId: string): Promise<void> {
+  try {
+    await updateDoc(doc(db, "notifications", notifId), {
+      is_read: true,
+    });
+  } catch (error: unknown) {
+    handleFirestoreError(error, OperationType.UPDATE, `notifications/${notifId}`);
+  }
+}
+
+export async function markAllNotificationsRead(notifIds: string[]): Promise<void> {
+  if (notifIds.length === 0) return;
+  try {
+    for (let i = 0; i < notifIds.length; i += 400) {
+      const chunk = notifIds.slice(i, i + 400);
+      const batch = writeBatch(db);
+      for (const id of chunk) {
+        batch.update(doc(db, "notifications", id), { is_read: true });
+      }
+      await batch.commit();
+    }
+  } catch (error: unknown) {
+    handleFirestoreError(error, OperationType.WRITE, "notifications");
+  }
 }

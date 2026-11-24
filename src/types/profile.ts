@@ -79,3 +79,37 @@ export interface WalletSettingsRecord {
   min_transactions: number;
   updatedAtMs: number;
 }
+
+export type ConnectionRequestStatus = "pending" | "accepted" | "declined";
+
+export interface ConnectionRequestRecord {
+  id: string;
+  fromUserId: string;
+  fromDisplayName: string;
+  fromUsername: string;
+  fromAccountType: AccountType;
+  toUserId: string;
+  toDisplayName: string;
+  toUsername: string;
+  message: string;
+  status: ConnectionRequestStatus;
+  createdAtMs: number;
+  respondedAtMs: number | null;
+}
+
+export type NotificationType = "client_request" | "request_accepted" | "request_declined";
+
+export interface NotificationRecord {
+  id: string;
+  userId: string;
+  actorUserId: string;
+  actorDisplayName: string;
+  actorUsername: string;
+  actorAccountType: AccountType;
+  type: NotificationType;
+  title: string;
+  body: string;
+  requestId: string;
+  is_read: boolean;
+  createdAtMs: number;
+}

@@ -323,6 +323,122 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidConnectionRequestCreate(data, requestId) {
+      return data.keys().hasAll([
+          'id',
+          'fromUserId',
+          'fromDisplayName',
+          'fromUsername',
+          'fromAccountType',
+          'toUserId',
+          'toDisplayName',
+          'toUsername',
+          'message',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'fromUserId',
+          'fromDisplayName',
+          'fromUsername',
+          'fromAccountType',
+          'toUserId',
+          'toDisplayName',
+          'toUsername',
+          'message',
+          'status',
+          'createdAt',
+          'updatedAt',
+          'respondedAt'
+        ])
+        && data.id is string
+        && isValidId(data.id)
+        && data.id == requestId
+        && data.fromUserId is string
+        && isValidId(data.fromUserId)
+        && data.fromUserId == request.auth.uid
+        && data.fromDisplayName is string
+        && data.fromDisplayName.size() >= 2
+        && data.fromDisplayName.size() <= 80
+        && isValidUsername(data.fromUsername)
+        && data.fromAccountType is string
+        && data.fromAccountType in ['freelancer', 'client']
+        && data.toUserId is string
+        && isValidId(data.toUserId)
+        && data.toUserId != request.auth.uid
+        && data.toDisplayName is string
+        && data.toDisplayName.size() >= 2
+        && data.toDisplayName.size() <= 80
+        && isValidUsername(data.toUsername)
+        && data.message is string
+        && data.message.size() <= 500
+        && data.status is string
+        && data.status == 'pending'
+        && (!('respondedAt' in data) || data.respondedAt == null)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNotificationCreate(data, notifId) {
+      return data.keys().hasAll([
+          'id',
+          'userId',
+          'actorUserId',
+          'actorDisplayName',
+          'actorUsername',
+          'actorAccountType',
+          'type',
+          'title',
+          'body',
+          'requestId',
+          'is_read',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'userId',
+          'actorUserId',
+          'actorDisplayName',
+          'actorUsername',
+          'actorAccountType',
+          'type',
+          'title',
+          'body',
+          'requestId',
+          'is_read',
+          'createdAt'
+        ])
+        && data.id is string
+        && isValidId(data.id)
+        && data.id == notifId
+        && data.userId is string
+        && isValidId(data.userId)
+        && data.userId != request.auth.uid
+        && data.actorUserId is string
+        && isValidId(data.actorUserId)
+        && data.actorUserId == request.auth.uid
+        && data.actorDisplayName is string
+        && data.actorDisplayName.size() >= 2
+        && data.actorDisplayName.size() <= 80
+        && isValidUsername(data.actorUsername)
+        && data.actorAccountType is string
+        && data.actorAccountType in ['freelancer', 'client']
+        && data.type is string
+        && data.type in ['client_request', 'request_accepted', 'request_declined']
+        && data.title is string
+        && data.title.size() >= 2
+        && data.title.size() <= 120
+        && data.body is string
+        && data.body.size() <= 500
+        && data.requestId is string
+        && isValidId(data.requestId)
+        && data.is_read is bool
+        && data.is_read == false
+        && data.createdAt is timestamp;
+    }
+
     match /profiles/{userId} {
       allow get: if isSignedIn() && isValidId(userId) && (
         isOwner(userId)
@@ -550,6 +666,92 @@ service cloud.firestore {
         && isValidWalletTransaction(incoming(), txId)
         && incoming().createdAt == request.time;
       allow update: if false;
+      allow delete: if false;
+    }
+
+    match /connection_requests/{requestId} {
+      allow get: if isSignedIn() && isValidId(requestId) && (
+        existing().fromUserId == request.auth.uid
+        || existing().toUserId == request.auth.uid
+        || isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        isAdmin()
+        || resource.data.fromUserId == request.auth.uid
+        || resource.data.toUserId == request.auth.uid
+      );
+      allow create: if isVerifiedUser()
+        && isValidId(requestId)
+        && isValidConnectionRequestCreate(incoming(), requestId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/profiles/$(incoming().toUserId))
+        && (!('account_type' in get(/databases/$(database)/documents/profiles/$(incoming().toUserId)).data)
+          || get(/databases/$(database)/documents/profiles/$(incoming().toUserId)).data.account_type == 'freelancer')
+        && (get(/databases/$(database)/documents/profiles/$(incoming().toUserId)).data.has_balance == true || isAdmin())
+        && existsAfter(/databases/$(database)/documents/notifications/$(requestId))
+        && getAfter(/databases/$(database)/documents/notifications/$(requestId)).data.requestId == requestId
+        && getAfter(/databases/$(database)/documents/notifications/$(requestId)).data.userId == incoming().toUserId
+        && getAfter(/databases/$(database)/documents/notifications/$(requestId)).data.actorUserId == request.auth.uid
+        && getAfter(/databases/$(database)/documents/notifications/$(requestId)).data.type == 'client_request';
+      allow update: if isVerifiedUser()
+        && isValidId(requestId)
+        && existing().toUserId == request.auth.uid
+        && existing().status == 'pending'
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt', 'respondedAt'])
+        && incoming().status is string
+        && incoming().status in ['accepted', 'declined']
+        && incoming().updatedAt == request.time
+        && incoming().respondedAt == request.time
+        && existsAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply'))
+        && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply')).data.requestId == requestId
+        && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply')).data.userId == existing().fromUserId
+        && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply')).data.actorUserId == request.auth.uid;
+      allow delete: if false;
+    }
+
+    match /notifications/{notifId} {
+      allow get: if isSignedIn() && isValidId(notifId) && (
+        existing().userId == request.auth.uid
+        || isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        isAdmin()
+        || resource.data.userId == request.auth.uid
+      );
+      allow create: if isVerifiedUser()
+        && isValidId(notifId)
+        && isValidNotificationCreate(incoming(), notifId)
+        && incoming().createdAt == request.time
+        && (
+          (
+            incoming().type == 'client_request'
+            && notifId == incoming().requestId
+            && existsAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId))
+            && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.fromUserId == request.auth.uid
+            && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.toUserId == incoming().userId
+          )
+          || (
+            incoming().type in ['request_accepted', 'request_declined']
+            && notifId == incoming().requestId + '_reply'
+            && exists(/databases/$(database)/documents/connection_requests/$(incoming().requestId))
+            && get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.toUserId == request.auth.uid
+            && get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.fromUserId == incoming().userId
+            && existsAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId))
+            && (
+              (incoming().type == 'request_accepted'
+                && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.status == 'accepted')
+              || (incoming().type == 'request_declined'
+                && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.status == 'declined')
+            )
+          )
+        );
+      allow update: if isVerifiedUser()
+        && isValidId(notifId)
+        && existing().userId == request.auth.uid
+        && incoming().diff(existing()).affectedKeys().hasOnly(['is_read'])
+        && incoming().is_read is bool
+        && incoming().is_read == true;
       allow delete: if false;
     }
   }

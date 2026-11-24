@@ -5,9 +5,12 @@ import {
   ArrowDownLeft,
   ArrowLeft,
   ArrowUpLeft,
+  Bell,
+  BellRing,
   BriefcaseBusiness,
   Camera,
   Check,
+  CheckCheck,
   CircleHelp,
   Compass,
   ExternalLink,
@@ -48,12 +51,18 @@ import {
   approveTopupRequest,
   formatArabicDate,
   manualCreditWallet,
+  mapConnectionRequestDoc,
+  mapNotificationDoc,
   mapProfileDoc,
   mapWalletDoc,
   mapWalletSettingsDoc,
+  markAllNotificationsRead,
+  markNotificationRead,
   MAX_TOPUP_TRANSACTIONS,
   rejectTopupRequest,
+  respondToConnectionRequest,
   saveWalletSettings,
+  sendClientConnectionRequest,
   submitTopupRequest,
   syncProfileBalanceVisibility,
   timestampToMillis,
@@ -61,8 +70,11 @@ import {
 } from "./lib/wallet";
 import type {
   AuthMeta,
+  ConnectionRequestRecord,
+  ConnectionRequestStatus,
   DakhlProfile,
   ExperienceLevel,
+  NotificationRecord,
   PortfolioProject,
   TopupRequestRecord,
   TopupStatus,
@@ -71,7 +83,16 @@ import type {
   WalletTransactionRecord,
 } from "./types/profile";
 
-type Section = "home" | "discover" | "opportunities" | "messages" | "assign" | "wallet" | "profile" | "admin";
+type Section =
+  | "home"
+  | "discover"
+  | "opportunities"
+  | "messages"
+  | "assign"
+  | "notifications"
+  | "wallet"
+  | "profile"
+  | "admin";
 
 type Person = {
   id: string;
@@ -102,11 +123,11 @@ type ChatThread = {
   time: string;
   avatar: string;
   tone: string;
+  initialMessage?: string;
 };
 
 const people: Person[] = [];
 const opportunities: Opportunity[] = [];
-const initialChats: ChatThread[] = [];
 
 const baseNavItems: { id: Section; label: string; icon: typeof House }[] = [
   { id: "home", label: "الرئيسية", icon: House },
@@ -114,6 +135,7 @@ const baseNavItems: { id: Section; label: string; icon: typeof House }[] = [
   { id: "opportunities", label: "الفرص", icon: BriefcaseBusiness },
   { id: "messages", label: "الرسائل", icon: MessageCircle },
   { id: "assign", label: "تعيين", icon: Users },
+  { id: "notifications", label: "الإشعارات", icon: Bell },
   { id: "wallet", label: "المحفظة", icon: Wallet },
 ];
 
@@ -123,6 +145,7 @@ const sectionTitles: Record<Section, string> = {
   opportunities: "فرص مناسبة لك",
   messages: "رسائلك",
   assign: "تعيين",
+  notifications: "الإشعارات وطلبات العملاء",
   wallet: "محفظتك",
   profile: "ملفي الشخصي",
   admin: "إدارة المحافظ والشحن",
@@ -141,7 +164,7 @@ function App({
   const [search, setSearch] = useState("");
   const [activeFilter, setActiveFilter] = useState("الكل");
   const [dialog, setDialog] = useState<"connect" | "topup" | "publish" | null>(null);
-  const [selectedPerson, setSelectedPerson] = useState<Person | null>(null);
+  const [connectTarget, setConnectTarget] = useState<DakhlProfile | null>(null);
   const [saved, setSaved] = useState<string[]>([]);
   const [messageText, setMessageText] = useState("");
   const [sentMessages, setSentMessages] = useState<string[]>([]);
@@ -155,6 +178,18 @@ function App({
   const [walletReady, setWalletReady] = useState(false);
   const [myRequests, setMyRequests] = useState<TopupRequestRecord[]>([]);
   const [myTransactions, setMyTransactions] = useState<WalletTransactionRecord[]>([]);
+
+  const [notifications, setNotifications] = useState<NotificationRecord[]>([]);
+  const [incomingRequests, setIncomingRequests] = useState<ConnectionRequestRecord[]>([]);
+  const [outgoingRequests, setOutgoingRequests] = useState<ConnectionRequestRecord[]>([]);
+  const [notifPopoverOpen, setNotifPopoverOpen] = useState(false);
+  const [respondingRequestId, setRespondingRequestId] = useState<string | null>(null);
+  const [browserNotifPermission, setBrowserNotifPermission] = useState<NotificationPermission>(() =>
+    typeof window !== "undefined" && "Notification" in window ? Notification.permission : "denied",
+  );
+  const notifContainerRef = useRef<HTMLDivElement | null>(null);
+  const initialNotifLoadedRef = useRef(false);
+  const seenNotifIdsRef = useRef<Record<string, boolean>>({});
 
   const [adminRequests, setAdminRequests] = useState<TopupRequestRecord[]>([]);
   const [adminWallets, setAdminWallets] = useState<Record<string, WalletRecord>>({});
@@ -187,6 +222,24 @@ function App({
   }, [isSuperUser]);
 
   useEffect(() => {
+    if (!notifPopoverOpen) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (
+        notifContainerRef.current &&
+        event.target instanceof Node &&
+        !notifContainerRef.current.contains(event.target)
+      ) {
+        setNotifPopoverOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [notifPopoverOpen]);
+
+  useEffect(() => {
+    initialNotifLoadedRef.current = false;
+    seenNotifIdsRef.current = {};
+
     const walletPath = `wallets/${profile.id}`;
     const unsubWallet = onSnapshot(
       doc(db, "wallets", profile.id),
@@ -256,11 +309,104 @@ function App({
       },
     );
 
+    const notifQuery = query(collection(db, "notifications"), where("userId", "==", profile.id));
+    const unsubNotifs = onSnapshot(
+      notifQuery,
+      (snapshot) => {
+        const items = snapshot.docs.map((d) => mapNotificationDoc(d.id, d.data()));
+        items.sort((a, b) => b.createdAtMs - a.createdAtMs);
+
+        if (!initialNotifLoadedRef.current) {
+          for (const item of items) {
+            seenNotifIdsRef.current[item.id] = true;
+          }
+          initialNotifLoadedRef.current = true;
+        } else {
+          for (const item of items) {
+            if (!seenNotifIdsRef.current[item.id]) {
+              seenNotifIdsRef.current[item.id] = true;
+              if (!item.is_read) {
+                setToast(`إشعار جديد: ${item.title}`);
+                window.setTimeout(() => setToast(""), 4200);
+                if (
+                  typeof window !== "undefined" &&
+                  "Notification" in window &&
+                  Notification.permission === "granted"
+                ) {
+                  try {
+                    new Notification(item.title, {
+                      body: item.body || "لديك إشعار جديد في منصة دخل.",
+                    });
+                  } catch {
+                    // Ignore browser notification errors inside restricted iframes
+                  }
+                }
+              }
+            }
+          }
+        }
+        setNotifications(items);
+      },
+      (error) => {
+        if (!auth.currentUser) return;
+        try {
+          handleFirestoreError(error, OperationType.LIST, "notifications");
+        } catch (wrapped: unknown) {
+          if (wrapped instanceof Error) setFatalError(wrapped);
+        }
+      },
+    );
+
+    const incomingConnQuery = query(
+      collection(db, "connection_requests"),
+      where("toUserId", "==", profile.id),
+    );
+    const unsubIncomingConn = onSnapshot(
+      incomingConnQuery,
+      (snapshot) => {
+        const items = snapshot.docs.map((d) => mapConnectionRequestDoc(d.id, d.data()));
+        items.sort((a, b) => b.createdAtMs - a.createdAtMs);
+        setIncomingRequests(items);
+      },
+      (error) => {
+        if (!auth.currentUser) return;
+        try {
+          handleFirestoreError(error, OperationType.LIST, "connection_requests");
+        } catch (wrapped: unknown) {
+          if (wrapped instanceof Error) setFatalError(wrapped);
+        }
+      },
+    );
+
+    const outgoingConnQuery = query(
+      collection(db, "connection_requests"),
+      where("fromUserId", "==", profile.id),
+    );
+    const unsubOutgoingConn = onSnapshot(
+      outgoingConnQuery,
+      (snapshot) => {
+        const items = snapshot.docs.map((d) => mapConnectionRequestDoc(d.id, d.data()));
+        items.sort((a, b) => b.createdAtMs - a.createdAtMs);
+        setOutgoingRequests(items);
+      },
+      (error) => {
+        if (!auth.currentUser) return;
+        try {
+          handleFirestoreError(error, OperationType.LIST, "connection_requests");
+        } catch (wrapped: unknown) {
+          if (wrapped instanceof Error) setFatalError(wrapped);
+        }
+      },
+    );
+
     return () => {
       unsubWallet();
       unsubRequests();
       unsubTx();
       unsubSettings();
+      unsubNotifs();
+      unsubIncomingConn();
+      unsubOutgoingConn();
     };
   }, [profile.id]);
 
@@ -435,14 +581,26 @@ function App({
     setSection(target);
   };
 
-  const openConnection = (person: Person) => {
+  const openConnection = (member: DakhlProfile) => {
+    if (member.id === profile.id) {
+      showToast("لا يمكنك إرسال طلب تواصل إلى نفسك.");
+      return;
+    }
     if (isLocked) {
       setSection("wallet");
       showToast("يرجى شحن المحفظة أولًا لفتح التواصل.");
       return;
     }
-    setSelectedPerson(person);
+    setConnectTarget(member);
     setDialog("connect");
+  };
+
+  const openPersonConnection = (person: Person) => {
+    const matched =
+      (isSuperUser ? adminProfiles : fundedProfiles).find((item) => item.id === person.id) ?? null;
+    if (matched) {
+      openConnection(matched);
+    }
   };
 
   const openPublish = () => {
@@ -459,6 +617,125 @@ function App({
     if (!text || !activeChat) return;
     setSentMessages((current) => [...current, text]);
     setMessageText("");
+  };
+
+  const unreadNotifCount = notifications.filter((item) => !item.is_read).length;
+
+  const requestsById = useMemo(() => {
+    const map: Record<string, ConnectionRequestRecord> = {};
+    for (const req of incomingRequests) {
+      map[req.id] = req;
+    }
+    for (const req of outgoingRequests) {
+      map[req.id] = req;
+    }
+    return map;
+  }, [incomingRequests, outgoingRequests]);
+
+  const outgoingStatusByTarget = useMemo(() => {
+    const map: Record<string, ConnectionRequestStatus> = {};
+    for (const req of outgoingRequests) {
+      const current = map[req.toUserId];
+      if (current === "accepted") continue;
+      if (req.status === "accepted" || req.status === "pending" || !current) {
+        map[req.toUserId] = req.status;
+      }
+    }
+    return map;
+  }, [outgoingRequests]);
+
+  const acceptedThreads = useMemo<ChatThread[]>(() => {
+    const combined = [...incomingRequests, ...outgoingRequests]
+      .filter((req) => req.status === "accepted")
+      .sort((a, b) => (b.respondedAtMs ?? b.createdAtMs) - (a.respondedAtMs ?? a.createdAtMs));
+
+    const seenPartners: Record<string, boolean> = {};
+    const list: ChatThread[] = [];
+    for (const req of combined) {
+      const incoming = req.toUserId === profile.id;
+      const partnerId = incoming ? req.fromUserId : req.toUserId;
+      if (seenPartners[partnerId]) continue;
+      seenPartners[partnerId] = true;
+      const partnerName = incoming ? req.fromDisplayName : req.toDisplayName;
+      list.push({
+        id: req.id,
+        name: partnerName,
+        last: req.message || "تم قبول طلب التواصل",
+        time: formatArabicDate(req.respondedAtMs ?? req.createdAtMs),
+        avatar: getInitials(partnerName),
+        tone: incoming ? "blue" : "rose",
+        initialMessage: req.message || undefined,
+      });
+    }
+    return list;
+  }, [incomingRequests, outgoingRequests, profile.id]);
+
+  const handleMarkNotifRead = async (notifId: string) => {
+    try {
+      await markNotificationRead(notifId);
+    } catch (error: unknown) {
+      if (error instanceof Error) setFatalError(error);
+    }
+  };
+
+  const handleMarkAllNotifsRead = async () => {
+    const unreadIds = notifications.filter((item) => !item.is_read).map((item) => item.id);
+    if (unreadIds.length === 0) return;
+    try {
+      await markAllNotificationsRead(unreadIds);
+      showToast("تم تحديد جميع الإشعارات كمقروءة.");
+    } catch (error: unknown) {
+      if (error instanceof Error) setFatalError(error);
+    }
+  };
+
+  const handleRespondRequest = async (
+    request: ConnectionRequestRecord,
+    decision: "accepted" | "declined",
+    relatedNotifId?: string,
+  ) => {
+    setRespondingRequestId(request.id);
+    try {
+      await respondToConnectionRequest({
+        request,
+        responder: profile,
+        decision,
+      });
+      if (relatedNotifId) {
+        void markNotificationRead(relatedNotifId).catch(() => {});
+      }
+      showToast(
+        decision === "accepted"
+          ? `تم قبول طلب ${request.fromDisplayName} وإرسال إشعار له — يمكنكما المتابعة في «الرسائل».`
+          : `تم رفض طلب ${request.fromDisplayName} وإبلاغه بذلك.`,
+      );
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message === "REQUEST_ALREADY_RESPONDED") {
+        showToast("تم الرد على هذا الطلب مسبقًا.");
+      } else if (error instanceof Error) {
+        setFatalError(error);
+      }
+    } finally {
+      setRespondingRequestId(null);
+    }
+  };
+
+  const handleEnableBrowserNotifications = async () => {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      showToast("متصفحك لا يدعم تنبيهات سطح المكتب.");
+      return;
+    }
+    try {
+      const permission = await Notification.requestPermission();
+      setBrowserNotifPermission(permission);
+      if (permission === "granted") {
+        showToast("تم تفعيل تنبيهات المتصفح الفورية بنجاح.");
+      } else {
+        showToast("لم يتم السماح بتنبيهات المتصفح — ستصل الإشعارات داخل المنصة مباشرة.");
+      }
+    } catch {
+      showToast("تعذّر طلب إذن تنبيهات المتصفح.");
+    }
   };
 
   const pendingAdminCount = adminRequests.filter((req) => req.status === "pending").length;
@@ -490,6 +767,102 @@ function App({
             {isLocked ? <Lock size={16} /> : <Plus size={17} />}
             <span>أضف فرصة</span>
           </button>
+          <div className="notif-bell-wrap" ref={notifContainerRef}>
+            <button
+              type="button"
+              className={`notif-bell-button ${notifPopoverOpen || effectiveSection === "notifications" ? "active" : ""}`}
+              aria-label="الإشعارات"
+              title="الإشعارات"
+              onClick={() => {
+                if (isLocked) {
+                  navigateTo("notifications");
+                  return;
+                }
+                setNotifPopoverOpen((open) => !open);
+              }}
+            >
+              <Bell size={17} />
+              {unreadNotifCount > 0 && (
+                <span className="notif-badge-dot">
+                  {unreadNotifCount > 99 ? "99+" : formatArabicNumber(unreadNotifCount)}
+                </span>
+              )}
+            </button>
+            {notifPopoverOpen && !isLocked && (
+              <div className="notif-popover" role="region" aria-label="أحدث الإشعارات">
+                <div className="notif-popover-head">
+                  <strong>
+                    الإشعارات{" "}
+                    {unreadNotifCount > 0
+                      ? `(${formatArabicNumber(unreadNotifCount)} جديدة)`
+                      : ""}
+                  </strong>
+                  {unreadNotifCount > 0 && (
+                    <button
+                      type="button"
+                      className="text-link"
+                      style={{ border: 0, background: "none", padding: 0 }}
+                      onClick={() => void handleMarkAllNotifsRead()}
+                    >
+                      تحديد الكل كمقروء
+                    </button>
+                  )}
+                </div>
+                <div className="notif-popover-list">
+                  {notifications.length > 0 ? (
+                    notifications.slice(0, 6).map((notif) => (
+                      <button
+                        key={notif.id}
+                        type="button"
+                        className={`notif-popover-item ${notif.is_read ? "" : "unread"}`}
+                        onClick={() => {
+                          if (!notif.is_read) {
+                            void handleMarkNotifRead(notif.id);
+                          }
+                          setNotifPopoverOpen(false);
+                          navigateTo("notifications");
+                        }}
+                      >
+                        <div className="notif-popover-item-title">
+                          <span>{notif.title}</span>
+                          {!notif.is_read && (
+                            <span
+                              style={{
+                                width: 8,
+                                height: 8,
+                                borderRadius: "50%",
+                                background: "var(--green)",
+                                flex: "none",
+                              }}
+                            />
+                          )}
+                        </div>
+                        <span className="notif-popover-item-body">{notif.body}</span>
+                        <time>{formatArabicDate(notif.createdAtMs)}</time>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="empty-state" style={{ margin: 12, padding: 18 }}>
+                      لا توجد إشعارات بعد. ستظهر هنا فور وصول طلبات عملاء أو ردود.
+                    </div>
+                  )}
+                </div>
+                <div className="notif-popover-foot">
+                  <button
+                    type="button"
+                    className="connect-button"
+                    style={{ fontSize: 12 }}
+                    onClick={() => {
+                      setNotifPopoverOpen(false);
+                      navigateTo("notifications");
+                    }}
+                  >
+                    عرض كل الإشعارات <ArrowLeft size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
           <button
             className="top-avatar"
             onClick={() => navigateTo("profile")}
@@ -540,6 +913,21 @@ function App({
                   <Icon size={19} strokeWidth={1.8} />
                   <span>{item.label}</span>
                   {itemLocked && <Lock size={14} style={{ marginRight: "auto", opacity: 0.65 }} />}
+                  {!itemLocked && item.id === "notifications" && unreadNotifCount > 0 && (
+                    <span
+                      style={{
+                        marginRight: "auto",
+                        background: "#d75247",
+                        color: "#ffffff",
+                        borderRadius: 99,
+                        padding: "1px 7px",
+                        fontSize: 10,
+                        fontWeight: 700,
+                      }}
+                    >
+                      {formatArabicNumber(unreadNotifCount)}
+                    </span>
+                  )}
                   {item.id === "admin" && pendingAdminCount > 0 && (
                     <span
                       style={{
@@ -609,7 +997,7 @@ function App({
                   setActiveFilter={setActiveFilter}
                   filteredPeople={filteredPeople}
                   setSection={navigateTo}
-                  onConnect={openConnection}
+                  onConnect={openPersonConnection}
                   saved={saved}
                   setSaved={setSaved}
                   onPublish={openPublish}
@@ -622,7 +1010,7 @@ function App({
                   setActiveFilter={setActiveFilter}
                   people={filteredPeople}
                   search={search}
-                  onConnect={openConnection}
+                  onConnect={openPersonConnection}
                   saved={saved}
                   setSaved={setSaved}
                 />
@@ -632,7 +1020,7 @@ function App({
               )}
               {effectiveSection === "messages" && (
                 <MessagesContent
-                  chats={initialChats}
+                  chats={acceptedThreads}
                   activeChat={activeChat}
                   setActiveChat={setActiveChat}
                   messageText={messageText}
@@ -643,16 +1031,36 @@ function App({
               )}
               {effectiveSection === "assign" && (
                 <AssignContent
+                  currentUserId={profile.id}
                   isSuperUser={isSuperUser}
                   profiles={isSuperUser ? adminProfiles : fundedProfiles}
                   wallets={adminWallets}
+                  outgoingStatusByTarget={outgoingStatusByTarget}
                   search={search}
                   setSearch={setSearch}
                   saved={saved}
                   setSaved={setSaved}
-                  onConnect={(member) => openConnection(profileToPerson(member))}
+                  onConnect={(member) => openConnection(member)}
+                  onOpenMessages={() => navigateTo("messages")}
                   onPreviewProfile={setPreviewProfile}
                   onOpenManualCredit={setManualCreditTarget}
+                />
+              )}
+              {effectiveSection === "notifications" && (
+                <NotificationsContent
+                  currentUserId={profile.id}
+                  notifications={notifications}
+                  requestsById={requestsById}
+                  respondingRequestId={respondingRequestId}
+                  browserNotifPermission={browserNotifPermission}
+                  onEnableBrowserNotifs={() => void handleEnableBrowserNotifications()}
+                  onMarkRead={(id) => void handleMarkNotifRead(id)}
+                  onMarkAllRead={() => void handleMarkAllNotifsRead()}
+                  onRespondRequest={(req, decision, notifId) =>
+                    void handleRespondRequest(req, decision, notifId)
+                  }
+                  onOpenAssign={() => navigateTo("assign")}
+                  onOpenMessages={() => navigateTo("messages")}
                 />
               )}
               {effectiveSection === "wallet" && (
@@ -777,7 +1185,12 @@ function App({
               className={effectiveSection === item.id ? "active" : ""}
               onClick={() => navigateTo(item.id)}
             >
-              {itemLocked ? <Lock size={18} /> : <Icon size={20} />}
+              <span className="mobile-nav-icon-wrap">
+                {itemLocked ? <Lock size={18} /> : <Icon size={20} />}
+                {!itemLocked && item.id === "notifications" && unreadNotifCount > 0 && (
+                  <span className="mobile-nav-dot" />
+                )}
+              </span>
               <span>
                 {item.label === "اكتشف أشخاصًا"
                   ? "اكتشف"
@@ -814,14 +1227,30 @@ function App({
         />
       )}
 
-      {dialog && dialog !== "topup" && (
-        <Dialog
-          type={dialog}
-          person={selectedPerson}
+      {dialog === "connect" && connectTarget && (
+        <ConnectRequestDialog
+          sender={profile}
+          target={connectTarget}
           unitPriceEgp={unitPriceEgp}
+          onClose={() => {
+            setDialog(null);
+            setConnectTarget(null);
+          }}
+          onSuccess={() => {
+            const targetName = connectTarget.display_name;
+            setDialog(null);
+            setConnectTarget(null);
+            showToast(`تم إرسال طلب التواصل وإشعار ${targetName} بنجاح.`);
+          }}
+          onFatalError={setFatalError}
+        />
+      )}
+
+      {dialog === "publish" && (
+        <Dialog
           onClose={() => setDialog(null)}
           onConfirm={() => {
-            showToast(dialog === "connect" ? "تم إغلاق النافذة." : "نشر الفرص قيد التفعيل.");
+            showToast("نشر الفرص قيد التفعيل.");
             setDialog(null);
           }}
         />
@@ -918,11 +1347,17 @@ function App({
       {previewProfile && (
         <ProfilePreviewDialog
           member={previewProfile}
+          currentUserId={profile.id}
           isSuperUser={isSuperUser}
+          outgoingStatus={outgoingStatusByTarget[previewProfile.id]}
           onClose={() => setPreviewProfile(null)}
           onConnect={(member) => {
             setPreviewProfile(null);
-            openConnection(profileToPerson(member));
+            openConnection(member);
+          }}
+          onOpenMessages={() => {
+            setPreviewProfile(null);
+            navigateTo("messages");
           }}
           onPreviewImage={(url, title) => setLightboxImage({ url, title })}
         />
@@ -1182,38 +1617,32 @@ function PersonCard({
   );
 }
 
-function profileToPerson(member: DakhlProfile): Person {
-  return {
-    id: member.id,
-    name: member.display_name,
-    role: experienceLabel(member.experience_level),
-    location: [member.city, member.governorate].filter(Boolean).join("، ") || "مصر",
-    skills: member.skills.length > 0 ? member.skills : member.interests,
-    avatar: getInitials(member.display_name),
-    tone: "blue",
-  };
-}
-
 function AssignContent({
+  currentUserId,
   isSuperUser,
   profiles,
   wallets,
+  outgoingStatusByTarget,
   search,
   setSearch,
   saved,
   setSaved,
   onConnect,
+  onOpenMessages,
   onPreviewProfile,
   onOpenManualCredit,
 }: {
+  currentUserId: string;
   isSuperUser: boolean;
   profiles: DakhlProfile[];
   wallets: Record<string, WalletRecord>;
+  outgoingStatusByTarget: Record<string, ConnectionRequestStatus>;
   search: string;
   setSearch: (value: string) => void;
   saved: string[];
   setSaved: (value: string[] | ((current: string[]) => string[])) => void;
   onConnect: (member: DakhlProfile) => void;
+  onOpenMessages: () => void;
   onPreviewProfile: (member: DakhlProfile) => void;
   onOpenManualCredit: (target: DakhlProfile) => void;
 }) {
@@ -1390,9 +1819,27 @@ function AssignContent({
                     >
                       <Eye size={14} /> عرض الأعمال
                     </button>
-                    <button className="connect-button" onClick={() => onConnect(member)}>
-                      تواصل <ArrowLeft size={14} />
-                    </button>
+                    {member.id === currentUserId ? (
+                      <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 600 }}>
+                        ملفك الشخصي
+                      </span>
+                    ) : outgoingStatusByTarget[member.id] === "accepted" ? (
+                      <button
+                        type="button"
+                        className="connect-button"
+                        onClick={onOpenMessages}
+                      >
+                        تم القبول · المحادثات <ArrowLeft size={14} />
+                      </button>
+                    ) : outgoingStatusByTarget[member.id] === "pending" ? (
+                      <span style={{ fontSize: 10, color: "#67766c", fontWeight: 600 }}>
+                        تم إرسال الطلب
+                      </span>
+                    ) : (
+                      <button className="connect-button" onClick={() => onConnect(member)}>
+                        تواصل <ArrowLeft size={14} />
+                      </button>
+                    )}
                   </>
                 )}
               </div>
@@ -1496,7 +1943,8 @@ function MessagesContent(props: {
   sentMessages: string[];
   onSend: () => void;
 }) {
-  const currentThread = props.chats.find((chat) => chat.id === props.activeChat) ?? null;
+  const currentThread =
+    props.chats.find((chat) => chat.id === props.activeChat) ?? props.chats[0] ?? null;
 
   return (
     <section className="messages-panel">
@@ -1509,7 +1957,7 @@ function MessagesContent(props: {
             <button
               key={chat.id}
               onClick={() => props.setActiveChat(chat.id)}
-              className={`chat-preview ${props.activeChat === chat.id ? "current" : ""}`}
+              className={`chat-preview ${currentThread?.id === chat.id ? "current" : ""}`}
             >
               <div className={`person-avatar small ${chat.tone}`}>{chat.avatar}</div>
               <div className="chat-preview-copy">
@@ -1534,8 +1982,19 @@ function MessagesContent(props: {
               <div className={`person-avatar small ${currentThread.tone}`}>{currentThread.avatar}</div>
               <div>
                 <strong>{currentThread.name}</strong>
+                <span>متصل عبر قبول طلب التواصل</span>
               </div>
             </div>
+            <div className="chat-notice">
+              <Check size={13} />
+              تم قبول طلب التواصل — يمكنكما متابعة تفاصيل الاتفاق هنا.
+            </div>
+            {currentThread.initialMessage && (
+              <div className="chat-bubble received">
+                {currentThread.initialMessage}
+                <time>{currentThread.time}</time>
+              </div>
+            )}
             {props.sentMessages.map((message, index) => (
               <div key={`${message}-${index}`} className="chat-bubble sent">
                 {message}
@@ -1561,6 +2020,242 @@ function MessagesContent(props: {
         ) : (
           <div className="empty-state" style={{ margin: "auto 0" }}>
             لا توجد رسائل حاليًا. تبدأ المحادثات بعد قبول طلبات التواصل.
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function NotificationsContent({
+  currentUserId,
+  notifications,
+  requestsById,
+  respondingRequestId,
+  browserNotifPermission,
+  onEnableBrowserNotifs,
+  onMarkRead,
+  onMarkAllRead,
+  onRespondRequest,
+  onOpenAssign,
+  onOpenMessages,
+}: {
+  currentUserId: string;
+  notifications: NotificationRecord[];
+  requestsById: Record<string, ConnectionRequestRecord>;
+  respondingRequestId: string | null;
+  browserNotifPermission: NotificationPermission;
+  onEnableBrowserNotifs: () => void;
+  onMarkRead: (notifId: string) => void;
+  onMarkAllRead: () => void;
+  onRespondRequest: (
+    req: ConnectionRequestRecord,
+    decision: "accepted" | "declined",
+    relatedNotifId?: string,
+  ) => void;
+  onOpenAssign: () => void;
+  onOpenMessages: () => void;
+}) {
+  const [filter, setFilter] = useState<"all" | "unread" | "requests">("all");
+  const unreadCount = notifications.filter((n) => !n.is_read).length;
+  const clientRequestCount = notifications.filter((n) => n.type === "client_request").length;
+  const supportsBrowserNotifications =
+    typeof window !== "undefined" && "Notification" in window;
+
+  const visibleNotifications = useMemo(() => {
+    if (filter === "unread") return notifications.filter((n) => !n.is_read);
+    if (filter === "requests") return notifications.filter((n) => n.type === "client_request");
+    return notifications;
+  }, [notifications, filter]);
+
+  return (
+    <section className="notif-page">
+      <div className="wallet-info">
+        <div className="info-icon">
+          <BellRing size={18} />
+        </div>
+        <div style={{ flex: 1 }}>
+          <strong>إشعارات العملاء وطلبات العمل الفورية</strong>
+          <p>
+            تصلك هنا فورًا كل طلبات التواصل من العملاء وأصحاب المشاريع لتتمكن من قبولها أو الرد عليها مباشرة.
+          </p>
+        </div>
+        {supportsBrowserNotifications && browserNotifPermission !== "granted" && (
+          <button
+            type="button"
+            className="primary-button"
+            style={{ whiteSpace: "nowrap", fontSize: 11, padding: "8px 12px" }}
+            onClick={onEnableBrowserNotifs}
+          >
+            <Bell size={14} /> تفعيل تنبيهات المتصفح
+          </button>
+        )}
+        {supportsBrowserNotifications && browserNotifPermission === "granted" && (
+          <span className="notif-status-tag accepted">
+            <Check size={13} /> تنبيهات المتصفح مفعّلة
+          </span>
+        )}
+      </div>
+
+      <div className="notif-toolbar">
+        <div className="filter-row" style={{ marginBottom: 0, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            className={`filter-chip ${filter === "all" ? "selected" : ""}`}
+            onClick={() => setFilter("all")}
+          >
+            الكل ({formatArabicNumber(notifications.length)})
+          </button>
+          <button
+            type="button"
+            className={`filter-chip ${filter === "unread" ? "selected" : ""}`}
+            onClick={() => setFilter("unread")}
+          >
+            غير مقروءة ({formatArabicNumber(unreadCount)})
+          </button>
+          <button
+            type="button"
+            className={`filter-chip ${filter === "requests" ? "selected" : ""}`}
+            onClick={() => setFilter("requests")}
+          >
+            طلبات العملاء ({formatArabicNumber(clientRequestCount)})
+          </button>
+        </div>
+        {unreadCount > 0 && (
+          <button type="button" className="cancel-button" onClick={onMarkAllRead}>
+            <CheckCheck size={14} style={{ verticalAlign: "middle", marginLeft: 5 }} />
+            تحديد الكل كمقروء
+          </button>
+        )}
+      </div>
+
+      <div className="notif-list">
+        {visibleNotifications.length > 0 ? (
+          visibleNotifications.map((notif) => {
+            const relatedRequest = notif.requestId ? requestsById[notif.requestId] : undefined;
+            const isIncomingPending =
+              notif.type === "client_request" &&
+              relatedRequest &&
+              relatedRequest.toUserId === currentUserId &&
+              relatedRequest.status === "pending";
+            const isBusy = Boolean(relatedRequest && respondingRequestId === relatedRequest.id);
+            const senderRole =
+              notif.actorAccountType === "client" ? "عميل · صاحب مشروع" : "مستقل";
+
+            return (
+              <article
+                key={notif.id}
+                className={`notif-card ${notif.is_read ? "" : "unread"}`}
+              >
+                <div
+                  className={`notif-card-icon ${
+                    notif.type === "request_accepted"
+                      ? "accepted"
+                      : notif.type === "request_declined"
+                        ? "declined"
+                        : ""
+                  }`}
+                >
+                  {notif.type === "request_accepted" ? (
+                    <Check size={18} />
+                  ) : notif.type === "request_declined" ? (
+                    <X size={18} />
+                  ) : (
+                    <BellRing size={18} />
+                  )}
+                </div>
+                <div className="notif-card-body">
+                  <div className="notif-card-head">
+                    <strong>{notif.title}</strong>
+                    <time>{formatArabicDate(notif.createdAtMs)}</time>
+                  </div>
+                  <div className="notif-card-meta">
+                    من: {notif.actorDisplayName} (<span dir="ltr">@{notif.actorUsername}</span>) ·{" "}
+                    {senderRole}
+                  </div>
+                  <div className="notif-card-message">{notif.body}</div>
+
+                  <div className="notif-card-actions">
+                    {relatedRequest && (
+                      <span className={`notif-status-tag ${relatedRequest.status}`}>
+                        {relatedRequest.status === "accepted"
+                          ? "تم قبول الطلب"
+                          : relatedRequest.status === "declined"
+                            ? "تم الاعتذار عن الطلب"
+                            : "بانتظار الرد"}
+                      </span>
+                    )}
+
+                    {isIncomingPending && relatedRequest && (
+                      <>
+                        <button
+                          type="button"
+                          className="primary-button"
+                          disabled={isBusy}
+                          style={{ padding: "7px 12px", fontSize: 11 }}
+                          onClick={() => onRespondRequest(relatedRequest, "accepted", notif.id)}
+                        >
+                          {isBusy ? (
+                            <LoaderCircle className="spin" size={13} />
+                          ) : (
+                            <Check size={13} />
+                          )}
+                          قبول الطلب
+                        </button>
+                        <button
+                          type="button"
+                          className="cancel-button"
+                          disabled={isBusy}
+                          style={{ padding: "7px 12px", fontSize: 11 }}
+                          onClick={() => onRespondRequest(relatedRequest, "declined", notif.id)}
+                        >
+                          رفض
+                        </button>
+                      </>
+                    )}
+
+                    {relatedRequest?.status === "accepted" && (
+                      <button
+                        type="button"
+                        className="connect-button"
+                        style={{ fontSize: 11 }}
+                        onClick={onOpenMessages}
+                      >
+                        فتح المحادثات <ArrowLeft size={13} />
+                      </button>
+                    )}
+
+                    {!notif.is_read && (
+                      <button
+                        type="button"
+                        className="connect-button"
+                        style={{ marginRight: "auto", color: "#5f6e65" }}
+                        onClick={() => onMarkRead(notif.id)}
+                      >
+                        <Check size={13} /> تحديد كمقروء
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </article>
+            );
+          })
+        ) : (
+          <div className="empty-state">
+            {filter !== "all" ? (
+              "لا توجد إشعارات ضمن هذا التصنيف حاليًا."
+            ) : (
+              <div style={{ display: "grid", gap: 10, justifyItems: "center" }}>
+                <span>لا توجد إشعارات بعد. عندما يتواصل معك عميل سيظهر التنبيه هنا فورًا.</span>
+                <button
+                  type="button"
+                  className="cancel-button"
+                  onClick={onOpenAssign}
+                >
+                  تصفح قائمة «تعيين»
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -3772,19 +4467,26 @@ function ProfileContent({
 
 function ProfilePreviewDialog({
   member,
+  currentUserId,
   isSuperUser,
+  outgoingStatus,
   onClose,
   onConnect,
+  onOpenMessages,
   onPreviewImage,
 }: {
   member: DakhlProfile;
+  currentUserId: string;
   isSuperUser: boolean;
+  outgoingStatus?: ConnectionRequestStatus;
   onClose: () => void;
   onConnect: (member: DakhlProfile) => void;
+  onOpenMessages: () => void;
   onPreviewImage: (url: string, title: string) => void;
 }) {
   const location = [member.city, member.governorate].filter(Boolean).join("، ") || "غير محدد";
   const projects = member.projects ?? [];
+  const isSelf = member.id === currentUserId;
 
   return (
     <div
@@ -3905,7 +4607,17 @@ function ProfilePreviewDialog({
         </div>
 
         <div className="dialog-actions">
-          {!isSuperUser && (
+          {!isSuperUser && !isSelf && outgoingStatus === "accepted" && (
+            <button type="button" className="primary-button" onClick={onOpenMessages}>
+              تم القبول · فتح المحادثات <ArrowLeft size={15} />
+            </button>
+          )}
+          {!isSuperUser && !isSelf && outgoingStatus === "pending" && (
+            <span className="notif-status-tag pending" style={{ flex: 1, justifyContent: "center" }}>
+              تم إرسال طلب التواصل — بانتظار الرد
+            </span>
+          )}
+          {!isSuperUser && !isSelf && outgoingStatus !== "accepted" && outgoingStatus !== "pending" && (
             <button type="button" className="primary-button" onClick={() => onConnect(member)}>
               تواصل مع {member.display_name} <ArrowLeft size={15} />
             </button>
@@ -3999,20 +4711,125 @@ function experienceLabel(level: DakhlProfile["experience_level"]) {
   }
 }
 
-function Dialog({
-  type,
-  person,
+function ConnectRequestDialog({
+  sender,
+  target,
   unitPriceEgp,
+  onClose,
+  onSuccess,
+  onFatalError,
+}: {
+  sender: DakhlProfile;
+  target: DakhlProfile;
+  unitPriceEgp: number;
+  onClose: () => void;
+  onSuccess: () => void;
+  onFatalError: (err: Error) => void;
+}) {
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
+
+  const handleSubmit = async () => {
+    setErrorMsg("");
+    setBusy(true);
+    try {
+      await sendClientConnectionRequest({
+        sender,
+        target,
+        message,
+      });
+      onSuccess();
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message === "CANNOT_CONTACT_SELF") {
+        setErrorMsg("لا يمكنك إرسال طلب تواصل إلى نفسك.");
+      } else if (error instanceof Error) {
+        onFatalError(error);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="dialog-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onClose();
+      }}
+    >
+      <section className="dialog-card" role="dialog" aria-modal="true" aria-labelledby="connect-dialog-title">
+        <button className="dialog-close" onClick={onClose} disabled={busy} aria-label="إغلاق">
+          <X size={19} />
+        </button>
+        <div className="dialog-icon">
+          <MessageCircle size={20} />
+        </div>
+        <h2 id="connect-dialog-title">ابدأ التواصل مع {target.display_name}</h2>
+        <p className="dialog-description">
+          سيصل إشعار فوري إلى @{target.username} بتفاصيل طلبك في قسم الإشعارات.
+        </p>
+
+        <label className="field-label" htmlFor="connect-request-message">
+          تفاصيل الطلب أو المشروع (اختياري)
+        </label>
+        <textarea
+          id="connect-request-message"
+          className="dialog-input"
+          rows={3}
+          maxLength={500}
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          placeholder="اكتب نبذة سريعة عن المطلوب، المدة المتوقعة، أو طريقة التواصل المفضلة..."
+        />
+
+        <div className="fee-breakdown">
+          <div className="fee-total">
+            <span>رسوم المعاملة عند القبول</span>
+            <strong>{formatArabicNumber(unitPriceEgp)} ج.م</strong>
+          </div>
+          <small>إرسال الطلب مجاني تمامًا، ولن يُخصم شيء عند الإرسال.</small>
+        </div>
+
+        {errorMsg && (
+          <div className="auth-message error" role="alert" style={{ marginTop: 10, marginBottom: 0 }}>
+            {errorMsg}
+          </div>
+        )}
+
+        <div className="dialog-actions">
+          <button
+            type="button"
+            className="primary-button"
+            disabled={busy}
+            onClick={() => void handleSubmit()}
+          >
+            {busy ? (
+              <>
+                <LoaderCircle className="spin" size={15} /> جارٍ إرسال الطلب...
+              </>
+            ) : (
+              <>
+                إرسال طلب التواصل <ArrowLeft size={15} />
+              </>
+            )}
+          </button>
+          <button type="button" className="cancel-button" disabled={busy} onClick={onClose}>
+            إلغاء
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Dialog({
   onClose,
   onConfirm,
 }: {
-  type: "connect" | "publish";
-  person: Person | null;
-  unitPriceEgp: number;
   onClose: () => void;
   onConfirm: () => void;
 }) {
-  const isConnect = type === "connect";
   return (
     <div
       className="dialog-backdrop"
@@ -4025,52 +4842,33 @@ function Dialog({
           <X size={19} />
         </button>
         <div className="dialog-icon">
-          {isConnect ? <MessageCircle size={20} /> : <BriefcaseBusiness size={20} />}
+          <BriefcaseBusiness size={20} />
         </div>
-        <h2 id="dialog-title">
-          {isConnect ? `ابدأ التواصل مع ${person?.name ?? ""}` : "أضف فرصة جديدة"}
-        </h2>
-        <p className="dialog-description">
-          {isConnect
-            ? "طلب التواصل مجاني. عند القبول، تُخصم رسوم المعاملة من محفظتك."
-            : "ساعد المجتمع على اكتشاف فرصة عملك أو مشروعك."}
-        </p>
-        {isConnect && (
-          <div className="fee-breakdown">
-            <div className="fee-total">
-              <span>رسوم المعاملة عند القبول</span>
-              <strong>{formatArabicNumber(unitPriceEgp)} ج.م</strong>
-            </div>
-            <small>لن يُخصم شيء عند إرسال الطلب، وتُخصم الرسوم عند القبول فقط.</small>
-          </div>
-        )}
-        {type === "publish" && (
-          <>
-            <label className="field-label" htmlFor="opportunity-title">
-              عنوان الفرصة
-            </label>
-            <input
-              id="opportunity-title"
-              className="dialog-input"
-              placeholder="مثال: مصمم جرافيك لمشروع ناشئ"
-            />
-            <label className="field-label" htmlFor="opportunity-description">
-              وصف مختصر
-            </label>
-            <textarea
-              id="opportunity-description"
-              className="dialog-input"
-              placeholder="ما المهارات أو المهمة المطلوبة؟"
-              rows={3}
-            />
-            <div className="payment-hint">
-              <Check size={15} /> نشر الفرصة مجاني. سيظل المحتوى خاضعًا لإرشادات المجتمع.
-            </div>
-          </>
-        )}
+        <h2 id="dialog-title">أضف فرصة جديدة</h2>
+        <p className="dialog-description">ساعد المجتمع على اكتشاف فرصة عملك أو مشروعك.</p>
+        <label className="field-label" htmlFor="opportunity-title">
+          عنوان الفرصة
+        </label>
+        <input
+          id="opportunity-title"
+          className="dialog-input"
+          placeholder="مثال: مصمم جرافيك لمشروع ناشئ"
+        />
+        <label className="field-label" htmlFor="opportunity-description">
+          وصف مختصر
+        </label>
+        <textarea
+          id="opportunity-description"
+          className="dialog-input"
+          placeholder="ما المهارات أو المهمة المطلوبة؟"
+          rows={3}
+        />
+        <div className="payment-hint">
+          <Check size={15} /> نشر الفرصة مجاني. سيظل المحتوى خاضعًا لإرشادات المجتمع.
+        </div>
         <div className="dialog-actions">
           <button className="primary-button" onClick={onConfirm}>
-            {isConnect ? "متابعة الطلب" : "حفظ كمسودة"} <ArrowLeft size={15} />
+            حفظ كمسودة <ArrowLeft size={15} />
           </button>
           <button className="cancel-button" onClick={onClose}>
             إلغاء
