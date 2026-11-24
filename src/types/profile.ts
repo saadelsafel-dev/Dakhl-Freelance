@@ -84,6 +84,8 @@ export interface WalletSettingsRecord {
 }
 
 export type ConnectionRequestStatus = "pending" | "accepted" | "declined";
+export type DealStatus = "active" | "delivered" | "cancelled";
+export type DeliveryCheckStatus = "pending" | "not_delivered" | "delivered";
 
 export interface ConnectionRequestRecord {
   id: string;
@@ -98,13 +100,26 @@ export interface ConnectionRequestRecord {
   status: ConnectionRequestStatus;
   createdAtMs: number;
   respondedAtMs: number | null;
+  deal_status?: DealStatus;
+  accepted_fee_egp?: number | null;
+  lastMessageAtMs?: number | null;
+  delivery_check_status?: DeliveryCheckStatus;
+  delivery_checked_at_ms?: number | null;
+  delivery_checked_by?: string | null;
+  deliveredAtMs?: number | null;
+  deliveredBy?: string | null;
+  cancelledAtMs?: number | null;
+  cancelledBy?: string | null;
+  refunded_amount_egp?: number | null;
 }
 
 export type NotificationType =
   | "client_request"
   | "request_accepted"
   | "request_declined"
-  | "chat_message";
+  | "chat_message"
+  | "deal_delivered"
+  | "deal_cancelled";
 
 export interface NotificationRecord {
   id: string;

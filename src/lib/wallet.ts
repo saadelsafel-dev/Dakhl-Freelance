@@ -1,5 +1,7 @@
 import {
   doc,
+  getDoc,
+  increment,
   runTransaction,
   serverTimestamp,
   setDoc,
@@ -15,6 +17,8 @@ import type {
   ConnectionRequestRecord,
   ConnectionRequestStatus,
   DakhlProfile,
+  DealStatus,
+  DeliveryCheckStatus,
   ExperienceLevel,
   NotificationRecord,
   NotificationType,
@@ -28,6 +32,7 @@ export const SUPERUSER_EMAIL = "saadelsafel@gmail.com";
 export const DEFAULT_MIN_TOPUP_TRANSACTIONS = 5;
 export const MAX_TOPUP_TRANSACTIONS = 1000;
 export const DEFAULT_TRANSACTION_UNIT_PRICE_EGP = 20;
+export const INACTIVITY_CHECKIN_MS = 24 * 60 * 60 * 1000;
 
 export function isSuperUserAccount(email: string | null | undefined, emailVerified: boolean) {
   return Boolean(emailVerified && email && email.trim().toLowerCase() === SUPERUSER_EMAIL);
@@ -656,6 +661,19 @@ export function mapConnectionRequestDoc(
   const statusRaw = data.status;
   const status: ConnectionRequestStatus =
     statusRaw === "accepted" || statusRaw === "declined" ? statusRaw : "pending";
+  const rawDealStatus = data.deal_status;
+  const deal_status: DealStatus | undefined =
+    status === "accepted"
+      ? rawDealStatus === "delivered" || rawDealStatus === "cancelled"
+        ? rawDealStatus
+        : "active"
+      : undefined;
+  const rawCheckStatus = data.delivery_check_status;
+  const delivery_check_status: DeliveryCheckStatus =
+    rawCheckStatus === "not_delivered" || rawCheckStatus === "delivered"
+      ? rawCheckStatus
+      : "pending";
+
   return {
     id: typeof data.id === "string" ? data.id : id,
     fromUserId: typeof data.fromUserId === "string" ? data.fromUserId : "",
@@ -669,6 +687,26 @@ export function mapConnectionRequestDoc(
     status,
     createdAtMs: timestampToMillis(data.createdAt),
     respondedAtMs: data.respondedAt ? timestampToMillis(data.respondedAt) : null,
+    deal_status,
+    accepted_fee_egp:
+      typeof data.accepted_fee_egp === "number" && Number.isFinite(data.accepted_fee_egp)
+        ? Math.max(0, Math.trunc(data.accepted_fee_egp))
+        : null,
+    lastMessageAtMs: data.lastMessageAt ? timestampToMillis(data.lastMessageAt) : null,
+    delivery_check_status,
+    delivery_checked_at_ms: data.delivery_checked_at
+      ? timestampToMillis(data.delivery_checked_at)
+      : null,
+    delivery_checked_by:
+      typeof data.delivery_checked_by === "string" ? data.delivery_checked_by : null,
+    deliveredAtMs: data.deliveredAt ? timestampToMillis(data.deliveredAt) : null,
+    deliveredBy: typeof data.deliveredBy === "string" ? data.deliveredBy : null,
+    cancelledAtMs: data.cancelledAt ? timestampToMillis(data.cancelledAt) : null,
+    cancelledBy: typeof data.cancelledBy === "string" ? data.cancelledBy : null,
+    refunded_amount_egp:
+      typeof data.refunded_amount_egp === "number" && Number.isFinite(data.refunded_amount_egp)
+        ? Math.max(0, Math.trunc(data.refunded_amount_egp))
+        : null,
   };
 }
 
@@ -677,7 +715,9 @@ export function mapNotificationDoc(id: string, data: Record<string, unknown>): N
   const type: NotificationType =
     rawType === "request_accepted" ||
     rawType === "request_declined" ||
-    rawType === "chat_message"
+    rawType === "chat_message" ||
+    rawType === "deal_delivered" ||
+    rawType === "deal_cancelled"
       ? rawType
       : "client_request";
   return {
@@ -792,6 +832,7 @@ export async function respondToConnectionRequest(params: {
 
   let deductedEgp = 0;
   let remainingTransactions: number | null = null;
+  let wroteDebit = false;
 
   try {
     await runTransaction(db, async (transaction) => {
@@ -837,6 +878,7 @@ export async function respondToConnectionRequest(params: {
           const nextRemaining = prevRemaining - 1;
           const nextHasBalance = nextBalance > 0 || nextRemaining > 0;
           remainingTransactions = nextRemaining;
+          wroteDebit = true;
 
           transaction.update(walletRef, {
             balance_egp: nextBalance,
@@ -881,11 +923,18 @@ export async function respondToConnectionRequest(params: {
         }
       }
 
-      transaction.update(reqRef, {
+      const reqUpdatePayload: Record<string, unknown> = {
         status: params.decision,
         updatedAt: serverTimestamp(),
         respondedAt: serverTimestamp(),
-      });
+      };
+      if (params.decision === "accepted") {
+        reqUpdatePayload.deal_status = "active";
+        if (wroteDebit) {
+          reqUpdatePayload.accepted_fee_egp = deductedEgp;
+        }
+      }
+      transaction.update(reqRef, reqUpdatePayload);
 
       transaction.set(notifRef, {
         id: notifId,
@@ -988,6 +1037,11 @@ export async function sendChatMessage(params: {
     createdAt: serverTimestamp(),
   });
 
+  batch.update(doc(db, "connection_requests", params.requestId), {
+    lastMessageAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
   batch.set(doc(db, "notifications", messageId), {
     id: messageId,
     userId: params.recipientId,
@@ -1013,4 +1067,267 @@ export async function sendChatMessage(params: {
     );
   }
   return messageId;
+}
+
+export async function markDealNotDeliveredYet(params: {
+  request: ConnectionRequestRecord;
+  actor: DakhlProfile;
+}): Promise<void> {
+  if (
+    params.request.fromUserId !== params.actor.id &&
+    params.request.toUserId !== params.actor.id
+  ) {
+    throw new Error("UNAUTHORIZED_DEAL_ACTION");
+  }
+  if (params.request.status !== "accepted") {
+    throw new Error("DEAL_NOT_ACCEPTED");
+  }
+  if (params.request.deal_status === "delivered") {
+    throw new Error("DEAL_ALREADY_DELIVERED");
+  }
+  if (params.request.deal_status === "cancelled") {
+    throw new Error("DEAL_ALREADY_CANCELLED");
+  }
+
+  const path = `connection_requests/${params.request.id}`;
+  try {
+    await updateDoc(doc(db, "connection_requests", params.request.id), {
+      delivery_check_status: "not_delivered",
+      delivery_checked_at: serverTimestamp(),
+      delivery_checked_by: params.actor.id,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error: unknown) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function confirmDealDelivery(params: {
+  request: ConnectionRequestRecord;
+  actor: DakhlProfile;
+}): Promise<void> {
+  if (
+    params.request.fromUserId !== params.actor.id &&
+    params.request.toUserId !== params.actor.id
+  ) {
+    throw new Error("UNAUTHORIZED_DEAL_ACTION");
+  }
+
+  const reqRef = doc(db, "connection_requests", params.request.id);
+  const notifId = `${params.request.id}_delivered`;
+  const notifRef = doc(db, "notifications", notifId);
+  const rawName = params.actor.display_name.trim() || params.actor.username || "عضو دخل";
+  const actorDisplayName = (rawName.length >= 2 ? rawName : "عضو دخل").slice(0, 80);
+  const actorType = params.actor.account_type === "client" ? "client" : "freelancer";
+
+  try {
+    await runTransaction(db, async (transaction) => {
+      const reqSnap = await transaction.get(reqRef);
+      if (!reqSnap.exists() || reqSnap.data().status !== "accepted") {
+        throw new Error("DEAL_NOT_ACCEPTED");
+      }
+      const reqData = reqSnap.data();
+      if (reqData.fromUserId !== params.actor.id && reqData.toUserId !== params.actor.id) {
+        throw new Error("UNAUTHORIZED_DEAL_ACTION");
+      }
+      if (reqData.deal_status === "delivered") {
+        throw new Error("DEAL_ALREADY_DELIVERED");
+      }
+      if (reqData.deal_status === "cancelled") {
+        throw new Error("DEAL_ALREADY_CANCELLED");
+      }
+
+      const partnerId =
+        reqData.fromUserId === params.actor.id
+          ? String(reqData.toUserId)
+          : String(reqData.fromUserId);
+
+      transaction.update(reqRef, {
+        deal_status: "delivered",
+        delivery_check_status: "delivered",
+        delivery_checked_at: serverTimestamp(),
+        delivery_checked_by: params.actor.id,
+        deliveredAt: serverTimestamp(),
+        deliveredBy: params.actor.id,
+        updatedAt: serverTimestamp(),
+      });
+
+      transaction.set(notifRef, {
+        id: notifId,
+        userId: partnerId,
+        actorUserId: params.actor.id,
+        actorDisplayName,
+        actorUsername: params.actor.username,
+        actorAccountType: actorType,
+        type: "deal_delivered",
+        title: `تم تأكيد التسليم — ${actorDisplayName}`.slice(0, 120),
+        body: `أكد ${actorDisplayName} (@${params.actor.username}) تسليم العمل. أصبحت المعاملة مكتملة ولا تُرد الرسوم بعد التسليم.`.slice(
+          0,
+          500,
+        ),
+        requestId: params.request.id,
+        is_read: false,
+        createdAt: serverTimestamp(),
+      });
+    });
+  } catch (error: unknown) {
+    if (
+      error instanceof Error &&
+      (error.message === "UNAUTHORIZED_DEAL_ACTION" ||
+        error.message === "DEAL_NOT_ACCEPTED" ||
+        error.message === "DEAL_ALREADY_DELIVERED" ||
+        error.message === "DEAL_ALREADY_CANCELLED")
+    ) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.WRITE, `connection_requests/${params.request.id}`);
+  }
+}
+
+export async function cancelConnectionDeal(params: {
+  request: ConnectionRequestRecord;
+  actor: DakhlProfile;
+}): Promise<{ refundedEgp: number; refundedTransaction: boolean }> {
+  if (
+    params.request.fromUserId !== params.actor.id &&
+    params.request.toUserId !== params.actor.id
+  ) {
+    throw new Error("UNAUTHORIZED_DEAL_ACTION");
+  }
+  if (params.request.status !== "accepted") {
+    throw new Error("DEAL_NOT_ACCEPTED");
+  }
+  if (params.request.deal_status === "delivered") {
+    throw new Error("CANNOT_CANCEL_DELIVERED");
+  }
+  if (params.request.deal_status === "cancelled") {
+    throw new Error("DEAL_ALREADY_CANCELLED");
+  }
+
+  let hasDebit = typeof params.request.accepted_fee_egp === "number";
+  let refundEgp =
+    typeof params.request.accepted_fee_egp === "number"
+      ? Math.max(0, Math.trunc(params.request.accepted_fee_egp))
+      : 0;
+
+  if (!hasDebit) {
+    try {
+      const debitSnap = await getDoc(
+        doc(db, "wallet_transactions", `${params.request.id}_debit`),
+      );
+      if (debitSnap.exists()) {
+        hasDebit = true;
+        const amt = debitSnap.data().amount_egp;
+        refundEgp = typeof amt === "number" && Number.isFinite(amt) ? Math.max(0, Math.trunc(amt)) : 0;
+      }
+    } catch {
+      hasDebit = false;
+      refundEgp = 0;
+    }
+  }
+
+  const reqRef = doc(db, "connection_requests", params.request.id);
+  const notifId = `${params.request.id}_cancelled`;
+  const notifRef = doc(db, "notifications", notifId);
+  const rawName = params.actor.display_name.trim() || params.actor.username || "عضو دخل";
+  const actorDisplayName = (rawName.length >= 2 ? rawName : "عضو دخل").slice(0, 80);
+  const actorType = params.actor.account_type === "client" ? "client" : "freelancer";
+
+  try {
+    await runTransaction(db, async (transaction) => {
+      const reqSnap = await transaction.get(reqRef);
+      if (!reqSnap.exists() || reqSnap.data().status !== "accepted") {
+        throw new Error("DEAL_NOT_ACCEPTED");
+      }
+      const reqData = reqSnap.data();
+      if (reqData.fromUserId !== params.actor.id && reqData.toUserId !== params.actor.id) {
+        throw new Error("UNAUTHORIZED_DEAL_ACTION");
+      }
+      if (reqData.deal_status === "delivered") {
+        throw new Error("CANNOT_CANCEL_DELIVERED");
+      }
+      if (reqData.deal_status === "cancelled") {
+        throw new Error("DEAL_ALREADY_CANCELLED");
+      }
+
+      const freelancerId = String(reqData.toUserId);
+      const partnerId =
+        reqData.fromUserId === params.actor.id ? freelancerId : String(reqData.fromUserId);
+
+      transaction.update(reqRef, {
+        deal_status: "cancelled",
+        cancelledAt: serverTimestamp(),
+        cancelledBy: params.actor.id,
+        refunded_amount_egp: hasDebit ? refundEgp : 0,
+        updatedAt: serverTimestamp(),
+      });
+
+      if (hasDebit) {
+        const walletRef = doc(db, "wallets", freelancerId);
+        const profileRef = doc(db, "profiles", freelancerId);
+        const refundTxId = `${params.request.id}_refund`;
+        const refundTxRef = doc(db, "wallet_transactions", refundTxId);
+
+        transaction.update(walletRef, {
+          balance_egp: increment(refundEgp),
+          remaining_transactions: increment(1),
+          is_unlocked: true,
+          last_refund_request_id: params.request.id,
+          updatedAt: serverTimestamp(),
+        });
+
+        transaction.set(refundTxRef, {
+          id: refundTxId,
+          userId: freelancerId,
+          type: "credit",
+          title: `استرداد رسوم معاملة ملغاة (${reqData.fromDisplayName || "العميل"})`.slice(0, 120),
+          amount_egp: refundEgp,
+          transactions_delta: 1,
+          requestId: params.request.id,
+          createdBy: params.actor.id,
+          createdAt: serverTimestamp(),
+        });
+
+        transaction.update(profileRef, {
+          has_balance: true,
+          wallet_priority: increment(refundEgp * 100 + 1),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      const refundNote = hasDebit
+        ? ` وتم رد ${refundEgp} ج.م ومعاملة واحدة إلى محفظة المستقل.`
+        : "";
+      transaction.set(notifRef, {
+        id: notifId,
+        userId: partnerId,
+        actorUserId: params.actor.id,
+        actorDisplayName,
+        actorUsername: params.actor.username,
+        actorAccountType: actorType,
+        type: "deal_cancelled",
+        title: `تم إلغاء المعاملة — ${actorDisplayName}`.slice(0, 120),
+        body: `قام ${actorDisplayName} (@${params.actor.username}) بإلغاء المعاملة قبل التسليم.${refundNote}`.slice(
+          0,
+          500,
+        ),
+        requestId: params.request.id,
+        is_read: false,
+        createdAt: serverTimestamp(),
+      });
+    });
+  } catch (error: unknown) {
+    if (
+      error instanceof Error &&
+      (error.message === "UNAUTHORIZED_DEAL_ACTION" ||
+        error.message === "DEAL_NOT_ACCEPTED" ||
+        error.message === "CANNOT_CANCEL_DELIVERED" ||
+        error.message === "DEAL_ALREADY_CANCELLED")
+    ) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.WRITE, `connection_requests/${params.request.id}`);
+  }
+
+  return { refundedEgp: hasDebit ? refundEgp : 0, refundedTransaction: hasDebit };
 }

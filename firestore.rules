@@ -185,7 +185,7 @@ service cloud.firestore {
 
     function isValidWallet(data, userId) {
       return data.keys().hasAll(['userId', 'balance_egp', 'remaining_transactions', 'is_unlocked', 'updatedAt'])
-        && data.keys().hasOnly(['userId', 'balance_egp', 'remaining_transactions', 'is_unlocked', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'balance_egp', 'remaining_transactions', 'is_unlocked', 'last_refund_request_id', 'updatedAt'])
         && data.userId is string
         && isValidId(data.userId)
         && data.userId == userId
@@ -196,6 +196,7 @@ service cloud.firestore {
         && data.remaining_transactions >= 0
         && data.remaining_transactions <= 100000
         && data.is_unlocked is bool
+        && (!('last_refund_request_id' in data) || data.last_refund_request_id == null || (data.last_refund_request_id is string && isValidId(data.last_refund_request_id)))
         && data.updatedAt is timestamp;
     }
 
@@ -426,6 +427,75 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidConnectionRequestUpdate(data, prev, requestId) {
+      return data.keys().hasAll([
+          'id',
+          'fromUserId',
+          'fromDisplayName',
+          'fromUsername',
+          'fromAccountType',
+          'toUserId',
+          'toDisplayName',
+          'toUsername',
+          'message',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'fromUserId',
+          'fromDisplayName',
+          'fromUsername',
+          'fromAccountType',
+          'toUserId',
+          'toDisplayName',
+          'toUsername',
+          'message',
+          'status',
+          'createdAt',
+          'updatedAt',
+          'respondedAt',
+          'deal_status',
+          'accepted_fee_egp',
+          'lastMessageAt',
+          'delivery_check_status',
+          'delivery_checked_at',
+          'delivery_checked_by',
+          'deliveredAt',
+          'deliveredBy',
+          'cancelledAt',
+          'cancelledBy',
+          'refunded_amount_egp'
+        ])
+        && data.id == requestId
+        && data.id == prev.id
+        && data.fromUserId == prev.fromUserId
+        && data.fromDisplayName == prev.fromDisplayName
+        && data.fromUsername == prev.fromUsername
+        && data.fromAccountType == prev.fromAccountType
+        && data.toUserId == prev.toUserId
+        && data.toDisplayName == prev.toDisplayName
+        && data.toUsername == prev.toUsername
+        && data.message == prev.message
+        && data.createdAt == prev.createdAt
+        && data.status is string
+        && data.status in ['pending', 'accepted', 'declined']
+        && (!('respondedAt' in data) || data.respondedAt == null || data.respondedAt is timestamp)
+        && (!('deal_status' in data) || data.deal_status == null || (data.deal_status is string && data.deal_status in ['active', 'delivered', 'cancelled']))
+        && (!('accepted_fee_egp' in data) || data.accepted_fee_egp == null || (data.accepted_fee_egp is int && data.accepted_fee_egp >= 0 && data.accepted_fee_egp <= 10000000))
+        && (!('lastMessageAt' in data) || data.lastMessageAt == null || data.lastMessageAt is timestamp)
+        && (!('delivery_check_status' in data) || data.delivery_check_status == null || (data.delivery_check_status is string && data.delivery_check_status in ['pending', 'not_delivered', 'delivered']))
+        && (!('delivery_checked_at' in data) || data.delivery_checked_at == null || data.delivery_checked_at is timestamp)
+        && (!('delivery_checked_by' in data) || data.delivery_checked_by == null || (data.delivery_checked_by is string && isValidId(data.delivery_checked_by)))
+        && (!('deliveredAt' in data) || data.deliveredAt == null || data.deliveredAt is timestamp)
+        && (!('deliveredBy' in data) || data.deliveredBy == null || (data.deliveredBy is string && isValidId(data.deliveredBy)))
+        && (!('cancelledAt' in data) || data.cancelledAt == null || data.cancelledAt is timestamp)
+        && (!('cancelledBy' in data) || data.cancelledBy == null || (data.cancelledBy is string && isValidId(data.cancelledBy)))
+        && (!('refunded_amount_egp' in data) || data.refunded_amount_egp == null || (data.refunded_amount_egp is int && data.refunded_amount_egp >= 0 && data.refunded_amount_egp <= 10000000))
+        && data.updatedAt is timestamp;
+    }
+
     function isValidNotificationCreate(data, notifId) {
       return data.keys().hasAll([
           'id',
@@ -471,7 +541,7 @@ service cloud.firestore {
         && data.actorAccountType is string
         && data.actorAccountType in ['freelancer', 'client']
         && data.type is string
-        && data.type in ['client_request', 'request_accepted', 'request_declined', 'chat_message']
+        && data.type in ['client_request', 'request_accepted', 'request_declined', 'chat_message', 'deal_delivered', 'deal_cancelled']
         && data.title is string
         && data.title.size() >= 2
         && data.title.size() <= 120
@@ -656,6 +726,25 @@ service cloud.firestore {
                   getAfter(/databases/$(database)/documents/wallets/$(userId)).data.remaining_transactions
                 )
               )
+              || (
+                (!('account_type' in existing()) || existing().account_type != 'client')
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'has_balance',
+                  'wallet_priority',
+                  'updatedAt'
+                ])
+                && existsAfter(/databases/$(database)/documents/wallets/$(userId))
+                && getAfter(/databases/$(database)/documents/wallets/$(userId)).data.updatedAt == request.time
+                && getAfter(/databases/$(database)/documents/wallets/$(userId)).data.remaining_transactions
+                   == get(/databases/$(database)/documents/wallets/$(userId)).data.remaining_transactions + 1
+                && ('last_refund_request_id' in getAfter(/databases/$(database)/documents/wallets/$(userId)).data)
+                && getAfter(/databases/$(database)/documents/wallets/$(userId)).data.last_refund_request_id is string
+                && existsAfter(/databases/$(database)/documents/wallet_transactions/$(getAfter(/databases/$(database)/documents/wallets/$(userId)).data.last_refund_request_id + '_refund'))
+                && incoming().has_balance == true
+                && incoming().wallet_priority is int
+                && incoming().wallet_priority >= 0
+                && incoming().wallet_priority <= 1000000100
+              )
             )
           )
         );
@@ -719,16 +808,49 @@ service cloud.firestore {
           'balance_egp',
           'remaining_transactions',
           'is_unlocked',
+          'last_refund_request_id',
           'updatedAt'
         ])
         && (
           isAdmin()
           || (
             isOwner(userId)
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'balance_egp',
+              'remaining_transactions',
+              'is_unlocked',
+              'updatedAt'
+            ])
             && existing().remaining_transactions >= 1
             && incoming().remaining_transactions == existing().remaining_transactions - 1
             && incoming().is_unlocked == (incoming().remaining_transactions > 0)
             && incoming().balance_egp == expectedPostDebitBalance(existing().balance_egp)
+            && (
+              !exists(/databases/$(database)/documents/profiles/$(userId))
+              || getAfter(/databases/$(database)/documents/profiles/$(userId)).data.updatedAt == request.time
+            )
+          )
+          || (
+            ('last_refund_request_id' in incoming())
+            && incoming().last_refund_request_id is string
+            && isValidId(incoming().last_refund_request_id)
+            && exists(/databases/$(database)/documents/connection_requests/$(incoming().last_refund_request_id))
+            && get(/databases/$(database)/documents/connection_requests/$(incoming().last_refund_request_id)).data.status == 'accepted'
+            && get(/databases/$(database)/documents/connection_requests/$(incoming().last_refund_request_id)).data.toUserId == userId
+            && (
+              get(/databases/$(database)/documents/connection_requests/$(incoming().last_refund_request_id)).data.fromUserId == request.auth.uid
+              || get(/databases/$(database)/documents/connection_requests/$(incoming().last_refund_request_id)).data.toUserId == request.auth.uid
+            )
+            && (
+              !('deal_status' in get(/databases/$(database)/documents/connection_requests/$(incoming().last_refund_request_id)).data)
+              || get(/databases/$(database)/documents/connection_requests/$(incoming().last_refund_request_id)).data.deal_status == 'active'
+            )
+            && exists(/databases/$(database)/documents/wallet_transactions/$(incoming().last_refund_request_id + '_debit'))
+            && !exists(/databases/$(database)/documents/wallet_transactions/$(incoming().last_refund_request_id + '_refund'))
+            && existsAfter(/databases/$(database)/documents/wallet_transactions/$(incoming().last_refund_request_id + '_refund'))
+            && incoming().remaining_transactions == existing().remaining_transactions + 1
+            && incoming().balance_egp == existing().balance_egp + get(/databases/$(database)/documents/wallet_transactions/$(incoming().last_refund_request_id + '_debit')).data.amount_egp
+            && incoming().is_unlocked == (incoming().remaining_transactions > 0)
             && (
               !exists(/databases/$(database)/documents/profiles/$(userId))
               || getAfter(/databases/$(database)/documents/profiles/$(userId)).data.updatedAt == request.time
@@ -778,7 +900,17 @@ service cloud.firestore {
     }
 
     match /wallet_transactions/{txId} {
-      allow get: if isSignedIn() && isValidId(txId) && (existing().userId == request.auth.uid || isAdmin());
+      allow get: if isSignedIn() && isValidId(txId) && (
+        existing().userId == request.auth.uid
+        || isAdmin()
+        || (
+          'requestId' in existing()
+          && existing().requestId is string
+          && txId == existing().requestId + '_debit'
+          && exists(/databases/$(database)/documents/connection_requests/$(existing().requestId))
+          && get(/databases/$(database)/documents/connection_requests/$(existing().requestId)).data.fromUserId == request.auth.uid
+        )
+      );
       allow list: if isSignedIn() && (isAdmin() || resource.data.userId == request.auth.uid);
       allow create: if isVerifiedUser()
         && isValidId(txId)
@@ -805,6 +937,32 @@ service cloud.firestore {
             && get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.status == 'pending'
             && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.status == 'accepted'
             && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.updatedAt == request.time
+          )
+          || (
+            incoming().type == 'credit'
+            && incoming().transactions_delta == 1
+            && incoming().requestId is string
+            && txId == incoming().requestId + '_refund'
+            && exists(/databases/$(database)/documents/connection_requests/$(incoming().requestId))
+            && get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.status == 'accepted'
+            && get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.toUserId == incoming().userId
+            && (
+              get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.fromUserId == request.auth.uid
+              || get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.toUserId == request.auth.uid
+            )
+            && (
+              !('deal_status' in get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data)
+              || get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.deal_status == 'active'
+            )
+            && exists(/databases/$(database)/documents/wallet_transactions/$(incoming().requestId + '_debit'))
+            && get(/databases/$(database)/documents/wallet_transactions/$(incoming().requestId + '_debit')).data.type == 'debit'
+            && get(/databases/$(database)/documents/wallet_transactions/$(incoming().requestId + '_debit')).data.userId == incoming().userId
+            && incoming().amount_egp == get(/databases/$(database)/documents/wallet_transactions/$(incoming().requestId + '_debit')).data.amount_egp
+            && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.deal_status == 'cancelled'
+            && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.updatedAt == request.time
+            && existsAfter(/databases/$(database)/documents/wallets/$(incoming().userId))
+            && getAfter(/databases/$(database)/documents/wallets/$(incoming().userId)).data.updatedAt == request.time
+            && getAfter(/databases/$(database)/documents/wallets/$(incoming().userId)).data.last_refund_request_id == incoming().requestId
           )
         );
       allow update: if false;
@@ -838,27 +996,120 @@ service cloud.firestore {
         && getAfter(/databases/$(database)/documents/notifications/$(requestId)).data.type == 'client_request';
       allow update: if isVerifiedUser()
         && isValidId(requestId)
-        && existing().toUserId == request.auth.uid
-        && existing().status == 'pending'
-        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt', 'respondedAt'])
-        && incoming().status is string
-        && incoming().status in ['accepted', 'declined']
+        && isValidConnectionRequestUpdate(incoming(), existing(), requestId)
         && incoming().updatedAt == request.time
-        && incoming().respondedAt == request.time
-        && existsAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply'))
-        && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply')).data.requestId == requestId
-        && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply')).data.userId == existing().fromUserId
-        && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply')).data.actorUserId == request.auth.uid
         && (
-          incoming().status == 'declined'
-          || isAdmin()
+          (
+            existing().toUserId == request.auth.uid
+            && existing().status == 'pending'
+            && incoming().status in ['accepted', 'declined']
+            && incoming().respondedAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt', 'respondedAt', 'deal_status', 'accepted_fee_egp'])
+            && existsAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply'))
+            && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply')).data.requestId == requestId
+            && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply')).data.userId == existing().fromUserId
+            && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_reply')).data.actorUserId == request.auth.uid
+            && (
+              (
+                incoming().status == 'declined'
+                && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt', 'respondedAt'])
+              )
+              || (
+                incoming().status == 'accepted'
+                && (!('deal_status' in incoming()) || incoming().deal_status == 'active')
+                && (
+                  (
+                    isAdmin()
+                    && !existsAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit'))
+                  )
+                  || (
+                    existsAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit'))
+                    && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit')).data.userId == request.auth.uid
+                    && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit')).data.requestId == requestId
+                    && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit')).data.type == 'debit'
+                    && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit')).data.transactions_delta == -1
+                    && (!('accepted_fee_egp' in incoming()) || incoming().accepted_fee_egp == getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit')).data.amount_egp)
+                  )
+                )
+              )
+            )
+          )
           || (
-            incoming().status == 'accepted'
-            && existsAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit'))
-            && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit')).data.userId == request.auth.uid
-            && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit')).data.requestId == requestId
-            && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit')).data.type == 'debit'
-            && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit')).data.transactions_delta == -1
+            (existing().fromUserId == request.auth.uid || existing().toUserId == request.auth.uid)
+            && existing().status == 'accepted'
+            && (!('deal_status' in existing()) || existing().deal_status != 'cancelled')
+            && incoming().diff(existing()).affectedKeys().hasOnly(['lastMessageAt', 'updatedAt'])
+            && incoming().lastMessageAt == request.time
+          )
+          || (
+            (existing().fromUserId == request.auth.uid || existing().toUserId == request.auth.uid)
+            && existing().status == 'accepted'
+            && (!('deal_status' in existing()) || existing().deal_status == 'active')
+            && incoming().diff(existing()).affectedKeys().hasOnly(['delivery_check_status', 'delivery_checked_at', 'delivery_checked_by', 'updatedAt'])
+            && incoming().delivery_check_status == 'not_delivered'
+            && incoming().delivery_checked_at == request.time
+            && incoming().delivery_checked_by == request.auth.uid
+          )
+          || (
+            (existing().fromUserId == request.auth.uid || existing().toUserId == request.auth.uid)
+            && existing().status == 'accepted'
+            && (!('deal_status' in existing()) || existing().deal_status == 'active')
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'deal_status',
+              'delivery_check_status',
+              'delivery_checked_at',
+              'delivery_checked_by',
+              'deliveredAt',
+              'deliveredBy',
+              'updatedAt'
+            ])
+            && incoming().deal_status == 'delivered'
+            && incoming().delivery_check_status == 'delivered'
+            && incoming().delivery_checked_at == request.time
+            && incoming().delivery_checked_by == request.auth.uid
+            && incoming().deliveredAt == request.time
+            && incoming().deliveredBy == request.auth.uid
+            && existsAfter(/databases/$(database)/documents/notifications/$(requestId + '_delivered'))
+            && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_delivered')).data.requestId == requestId
+            && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_delivered')).data.type == 'deal_delivered'
+            && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_delivered')).data.actorUserId == request.auth.uid
+          )
+          || (
+            (existing().fromUserId == request.auth.uid || existing().toUserId == request.auth.uid)
+            && existing().status == 'accepted'
+            && (!('deal_status' in existing()) || existing().deal_status == 'active')
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'deal_status',
+              'cancelledAt',
+              'cancelledBy',
+              'refunded_amount_egp',
+              'updatedAt'
+            ])
+            && incoming().deal_status == 'cancelled'
+            && incoming().cancelledAt == request.time
+            && incoming().cancelledBy == request.auth.uid
+            && existsAfter(/databases/$(database)/documents/notifications/$(requestId + '_cancelled'))
+            && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_cancelled')).data.requestId == requestId
+            && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_cancelled')).data.type == 'deal_cancelled'
+            && getAfter(/databases/$(database)/documents/notifications/$(requestId + '_cancelled')).data.actorUserId == request.auth.uid
+            && (
+              (
+                !exists(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit'))
+                && incoming().refunded_amount_egp == 0
+              )
+              || (
+                exists(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit'))
+                && existsAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_refund'))
+                && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_refund')).data.userId == existing().toUserId
+                && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_refund')).data.requestId == requestId
+                && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_refund')).data.type == 'credit'
+                && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_refund')).data.transactions_delta == 1
+                && getAfter(/databases/$(database)/documents/wallet_transactions/$(requestId + '_refund')).data.amount_egp
+                   == get(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit')).data.amount_egp
+                && incoming().refunded_amount_egp
+                   == get(/databases/$(database)/documents/wallet_transactions/$(requestId + '_debit')).data.amount_egp
+              )
+            )
           )
         );
       allow delete: if false;
@@ -880,6 +1131,10 @@ service cloud.firestore {
           && incoming().createdAt == request.time
           && exists(/databases/$(database)/documents/connection_requests/$(requestId))
           && get(/databases/$(database)/documents/connection_requests/$(requestId)).data.status == 'accepted'
+          && (
+            !('deal_status' in get(/databases/$(database)/documents/connection_requests/$(requestId)).data)
+            || get(/databases/$(database)/documents/connection_requests/$(requestId)).data.deal_status != 'cancelled'
+          )
           && (
             (
               get(/databases/$(database)/documents/connection_requests/$(requestId)).data.fromUserId == request.auth.uid
@@ -953,6 +1208,33 @@ service cloud.firestore {
             && existsAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)/messages/$(notifId))
             && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)/messages/$(notifId)).data.senderId == request.auth.uid
             && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)/messages/$(notifId)).data.recipientId == incoming().userId
+          )
+          || (
+            incoming().type in ['deal_delivered', 'deal_cancelled']
+            && (
+              (incoming().type == 'deal_delivered' && notifId == incoming().requestId + '_delivered')
+              || (incoming().type == 'deal_cancelled' && notifId == incoming().requestId + '_cancelled')
+            )
+            && exists(/databases/$(database)/documents/connection_requests/$(incoming().requestId))
+            && get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.status == 'accepted'
+            && (
+              (
+                get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.fromUserId == request.auth.uid
+                && get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.toUserId == incoming().userId
+              )
+              || (
+                get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.toUserId == request.auth.uid
+                && get(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.fromUserId == incoming().userId
+              )
+            )
+            && existsAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId))
+            && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.updatedAt == request.time
+            && (
+              (incoming().type == 'deal_delivered'
+                && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.deal_status == 'delivered')
+              || (incoming().type == 'deal_cancelled'
+                && getAfter(/databases/$(database)/documents/connection_requests/$(incoming().requestId)).data.deal_status == 'cancelled')
+            )
           )
         );
       allow update: if isVerifiedUser()

@@ -12,7 +12,9 @@ import {
   Camera,
   Check,
   CheckCheck,
+  CheckCircle2,
   CircleHelp,
+  Clock,
   Compass,
   ExternalLink,
   Eye,
@@ -29,6 +31,7 @@ import {
   MessageCircle,
   Pencil,
   Plus,
+  RotateCcw,
   Search,
   Send,
   ShieldCheck,
@@ -50,8 +53,11 @@ import {
 } from "./lib/media";
 import {
   approveTopupRequest,
+  cancelConnectionDeal,
   computeWalletPriority,
+  confirmDealDelivery,
   formatArabicDate,
+  INACTIVITY_CHECKIN_MS,
   manualCreditWallet,
   mapChatMessageDoc,
   mapConnectionRequestDoc,
@@ -60,6 +66,7 @@ import {
   mapWalletDoc,
   mapWalletSettingsDoc,
   markAllNotificationsRead,
+  markDealNotDeliveredYet,
   markNotificationRead,
   MAX_TOPUP_TRANSACTIONS,
   rejectTopupRequest,
@@ -78,6 +85,8 @@ import type {
   ConnectionRequestRecord,
   ConnectionRequestStatus,
   DakhlProfile,
+  DealStatus,
+  DeliveryCheckStatus,
   ExperienceLevel,
   NotificationRecord,
   PortfolioProject,
@@ -125,6 +134,17 @@ type ChatThread = {
   initialMessageSenderId?: string;
   initialTime?: string;
   hasUnread?: boolean;
+  request: ConnectionRequestRecord;
+  dealStatus: DealStatus;
+  acceptedFeeEgp: number;
+  checkInBaselineMs: number;
+  inactiveDurationMs: number;
+  needsDeliveryCheckIn: boolean;
+  deliveryCheckStatus: DeliveryCheckStatus;
+  deliveryCheckedAtMs: number | null;
+  deliveredAtMs: number | null;
+  cancelledAtMs: number | null;
+  refundedAmountEgp: number | null;
 };
 
 const DIRECTORY_CATEGORIES: { id: string; keywords: string[] }[] = [
@@ -215,6 +235,8 @@ function App({
   const [outgoingRequests, setOutgoingRequests] = useState<ConnectionRequestRecord[]>([]);
   const [notifPopoverOpen, setNotifPopoverOpen] = useState(false);
   const [respondingRequestId, setRespondingRequestId] = useState<string | null>(null);
+  const [dealActionBusyId, setDealActionBusyId] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const [browserNotifPermission, setBrowserNotifPermission] = useState<NotificationPermission>(() =>
     typeof window !== "undefined" && "Notification" in window ? Notification.permission : "denied",
   );
@@ -245,6 +267,11 @@ function App({
   const isClient = !isSuperUser && profile.account_type === "client";
   const isLocked =
     !isSuperUser && !isClient && (!wallet.is_unlocked || wallet.remaining_transactions <= 0);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const navItems = useMemo(() => {
     if (isSuperUser) {
@@ -678,17 +705,6 @@ function App({
   const unitPriceEgp = walletSettings.transaction_price_egp;
   const minTransactions = walletSettings.min_transactions;
 
-  const navigateTo = (target: Section) => {
-    if (isLocked && target !== "wallet") {
-      setSection("wallet");
-      showToast(
-        `كل الأقسام مقفولة حاليًا — اشحن رصيدك (${formatArabicNumber(minTransactions)} معاملات على الأقل) لفتح الحساب.`,
-      );
-      return;
-    }
-    setSection(target);
-  };
-
   const openConnection = (member: DakhlProfile) => {
     if (member.id === profile.id) {
       showToast("لا يمكنك إرسال طلب تواصل إلى نفسك.");
@@ -783,11 +799,28 @@ function App({
             ? fromActive
             : fromNotif
           : fromActive ?? fromNotif;
-      const lastMs = latest && latest.createdAtMs >= baseMs ? latest.createdAtMs : baseMs;
+      const latestMessageMs = Math.max(
+        baseMs,
+        req.lastMessageAtMs ?? 0,
+        latest && latest.createdAtMs >= baseMs ? latest.createdAtMs : 0,
+      );
+      const lastMs = latestMessageMs;
+      const dealStatus: DealStatus = req.deal_status ?? "active";
+      const deliveryCheckStatus: DeliveryCheckStatus = req.delivery_check_status ?? "pending";
+      const deliveryCheckedAtMs = req.delivery_checked_at_ms ?? null;
+      const checkInBaselineMs = Math.max(latestMessageMs, deliveryCheckedAtMs ?? 0);
+      const inactiveDurationMs = Math.max(0, nowMs - checkInBaselineMs);
+      const needsDeliveryCheckIn =
+        dealStatus === "active" && inactiveDurationMs >= INACTIVITY_CHECKIN_MS;
+
       const lastText =
-        latest && latest.createdAtMs >= baseMs
-          ? latest.text
-          : req.message || "تم قبول طلب التواصل";
+        dealStatus === "cancelled"
+          ? "تم إلغاء المعاملة"
+          : dealStatus === "delivered"
+            ? "✓ تم تأكيد تسليم العمل"
+            : latest && latest.createdAtMs >= baseMs
+              ? latest.text
+              : req.message || "تم قبول طلب التواصل";
       list.push({
         id: req.id,
         partnerId,
@@ -801,12 +834,50 @@ function App({
         initialMessage: req.message || undefined,
         initialMessageSenderId: req.fromUserId,
         initialTime: formatArabicDate(req.createdAtMs),
-        hasUnread: Boolean(unreadChatIds[req.id]),
+        hasUnread: Boolean(unreadChatIds[req.id]) || needsDeliveryCheckIn,
+        request: req,
+        dealStatus,
+        acceptedFeeEgp: req.accepted_fee_egp ?? unitPriceEgp,
+        checkInBaselineMs,
+        inactiveDurationMs,
+        needsDeliveryCheckIn,
+        deliveryCheckStatus,
+        deliveryCheckedAtMs,
+        deliveredAtMs: req.deliveredAtMs ?? null,
+        cancelledAtMs: req.cancelledAtMs ?? null,
+        refundedAmountEgp: req.refunded_amount_egp ?? null,
       });
     }
     list.sort((a, b) => b.lastMs - a.lastMs || b.id.localeCompare(a.id));
     return list;
-  }, [incomingRequests, outgoingRequests, profile.id, notifications, lastMessageByRequestId]);
+  }, [
+    incomingRequests,
+    outgoingRequests,
+    profile.id,
+    notifications,
+    lastMessageByRequestId,
+    nowMs,
+    unitPriceEgp,
+  ]);
+
+  const checkInPendingThreads = useMemo(
+    () => acceptedThreads.filter((thread) => thread.needsDeliveryCheckIn),
+    [acceptedThreads],
+  );
+
+  const canAccessSection = (target: Section) =>
+    !isLocked || target === "wallet" || (target === "messages" && acceptedThreads.length > 0);
+
+  const navigateTo = (target: Section) => {
+    if (!canAccessSection(target)) {
+      setSection("wallet");
+      showToast(
+        `كل الأقسام مقفولة حاليًا — اشحن رصيدك (${formatArabicNumber(minTransactions)} معاملات على الأقل) لفتح الحساب.`,
+      );
+      return;
+    }
+    setSection(target);
+  };
 
   const effectiveActiveChatId = useMemo(() => {
     if (activeChat && acceptedThreads.some((thread) => thread.id === activeChat)) {
@@ -821,7 +892,7 @@ function App({
   );
 
   const pendingAdminCount = adminRequests.filter((req) => req.status === "pending").length;
-  const effectiveSection: Section = isLocked ? "wallet" : section;
+  const effectiveSection: Section = canAccessSection(section) ? section : "wallet";
 
   useEffect(() => {
     effectiveSectionRef.current = effectiveSection;
@@ -1000,6 +1071,71 @@ function App({
     }
   };
 
+  const handleMarkNotDeliveredYet = async (request: ConnectionRequestRecord) => {
+    setDealActionBusyId(request.id);
+    try {
+      await markDealNotDeliveredYet({ request, actor: profile });
+      setNowMs(Date.now());
+      showToast("تم تسجيل أن التسليم لم يتم بعد — تستمر المعاملة نشطة.");
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message === "DEAL_ALREADY_DELIVERED") {
+        showToast("تم تأكيد تسليم هذه المعاملة مسبقًا.");
+      } else if (error instanceof Error && error.message === "DEAL_ALREADY_CANCELLED") {
+        showToast("تم إلغاء هذه المعاملة مسبقًا.");
+      } else if (error instanceof Error) {
+        setFatalError(error);
+      }
+    } finally {
+      setDealActionBusyId(null);
+    }
+  };
+
+  const handleConfirmDelivery = async (request: ConnectionRequestRecord) => {
+    setDealActionBusyId(request.id);
+    try {
+      await confirmDealDelivery({ request, actor: profile });
+      setNowMs(Date.now());
+      showToast("تم تأكيد تسليم العمل — المعاملة مكتملة ولا تُرد الرسوم بعد التسليم.");
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message === "DEAL_ALREADY_DELIVERED") {
+        showToast("تم تأكيد تسليم هذه المعاملة مسبقًا.");
+      } else if (error instanceof Error && error.message === "DEAL_ALREADY_CANCELLED") {
+        showToast("تم إلغاء هذه المعاملة مسبقًا.");
+      } else if (error instanceof Error) {
+        setFatalError(error);
+      }
+    } finally {
+      setDealActionBusyId(null);
+    }
+  };
+
+  const handleCancelDeal = async (request: ConnectionRequestRecord) => {
+    setDealActionBusyId(request.id);
+    try {
+      const result = await cancelConnectionDeal({ request, actor: profile });
+      setNowMs(Date.now());
+      if (result.refundedTransaction && result.refundedEgp > 0) {
+        showToast(
+          `تم إلغاء المعاملة وإرجاع ${formatArabicNumber(result.refundedEgp)} ج.م ومعاملة واحدة لمحفظة المستقل بنجاح.`,
+        );
+      } else if (result.refundedTransaction) {
+        showToast("تم إلغاء المعاملة وإعادة معاملة واحدة لمحفظة المستقل.");
+      } else {
+        showToast("تم إلغاء المعاملة وإغلاق المحادثة.");
+      }
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message === "CANNOT_CANCEL_DELIVERED") {
+        showToast("تم التسليم بالفعل — لا يمكن إلغاء المعاملة أو استرداد الرسوم بعد التسليم.");
+      } else if (error instanceof Error && error.message === "DEAL_ALREADY_CANCELLED") {
+        showToast("تم إلغاء هذه المعاملة مسبقًا.");
+      } else if (error instanceof Error) {
+        setFatalError(error);
+      }
+    } finally {
+      setDealActionBusyId(null);
+    }
+  };
+
   const handleEnableBrowserNotifications = async () => {
     if (typeof window === "undefined" || !("Notification" in window)) {
       showToast("متصفحك لا يدعم تنبيهات سطح المكتب.");
@@ -1098,7 +1234,10 @@ function App({
                           }
                           setNotifPopoverOpen(false);
                           if (
-                            (notif.type === "chat_message" || notif.type === "request_accepted") &&
+                            (notif.type === "chat_message" ||
+                              notif.type === "request_accepted" ||
+                              notif.type === "deal_delivered" ||
+                              notif.type === "deal_cancelled") &&
                             notif.requestId
                           ) {
                             openChatThread(notif.requestId);
@@ -1187,7 +1326,7 @@ function App({
           <nav className="side-nav" aria-label="التنقل الرئيسي">
             {navItems.map((item) => {
               const Icon = item.icon;
-              const itemLocked = isLocked && item.id !== "wallet";
+              const itemLocked = !canAccessSection(item.id);
               return (
                 <button
                   key={item.id}
@@ -1197,21 +1336,23 @@ function App({
                   <Icon size={19} strokeWidth={1.8} />
                   <span>{item.label}</span>
                   {itemLocked && <Lock size={14} style={{ marginRight: "auto", opacity: 0.65 }} />}
-                  {!itemLocked && item.id === "messages" && unreadChatCount > 0 && (
-                    <span
-                      style={{
-                        marginRight: "auto",
-                        background: "#244e41",
-                        color: "#ffffff",
-                        borderRadius: 99,
-                        padding: "1px 7px",
-                        fontSize: 10,
-                        fontWeight: 700,
-                      }}
-                    >
-                      {formatArabicNumber(unreadChatCount)}
-                    </span>
-                  )}
+                  {!itemLocked &&
+                    item.id === "messages" &&
+                    (unreadChatCount > 0 || checkInPendingThreads.length > 0) && (
+                      <span
+                        style={{
+                          marginRight: "auto",
+                          background: checkInPendingThreads.length > 0 ? "#b86b1b" : "#244e41",
+                          color: "#ffffff",
+                          borderRadius: 99,
+                          padding: "1px 7px",
+                          fontSize: 10,
+                          fontWeight: 700,
+                        }}
+                      >
+                        {formatArabicNumber(unreadChatCount + checkInPendingThreads.length)}
+                      </span>
+                    )}
                   {!itemLocked && item.id === "notifications" && unreadNotifCount > 0 && (
                     <span
                       style={{
@@ -1265,7 +1406,9 @@ function App({
             <div className="content-heading">
               <div>
                 <h1>
-                  {isLocked ? "تفعيل الحساب والمحفظة" : sectionTitles[effectiveSection]}
+                  {isLocked && effectiveSection === "wallet"
+                    ? "تفعيل الحساب والمحفظة"
+                    : sectionTitles[effectiveSection]}
                 </h1>
               </div>
             </div>
@@ -1273,7 +1416,7 @@ function App({
 
           {!walletReady && !isSuperUser && !isClient ? (
             <div className="empty-state">جارٍ التحقق من حالة المحفظة...</div>
-          ) : isLocked ? (
+          ) : isLocked && effectiveSection === "wallet" ? (
             <WalletContent
               isLocked
               isClient={false}
@@ -1336,7 +1479,11 @@ function App({
                   messageText={messageText}
                   setMessageText={setMessageText}
                   sendingMessage={sendingMessage}
+                  dealActionBusyId={dealActionBusyId}
                   onSend={() => void sendMessage()}
+                  onMarkNotDelivered={(req) => void handleMarkNotDeliveredYet(req)}
+                  onConfirmDelivery={(req) => void handleConfirmDelivery(req)}
+                  onCancelDeal={(req) => void handleCancelDeal(req)}
                 />
               )}
               {effectiveSection === "assign" && (
@@ -1361,6 +1508,7 @@ function App({
                   currentUserId={profile.id}
                   notifications={notifications}
                   requestsById={requestsById}
+                  checkInPendingThreads={checkInPendingThreads}
                   respondingRequestId={respondingRequestId}
                   browserNotifPermission={browserNotifPermission}
                   onEnableBrowserNotifs={() => void handleEnableBrowserNotifications()}
@@ -1488,7 +1636,7 @@ function App({
       <nav className="mobile-nav" aria-label="التنقل">
         {baseNavItems.map((item) => {
           const Icon = item.icon;
-          const itemLocked = isLocked && item.id !== "wallet";
+          const itemLocked = !canAccessSection(item.id);
           return (
             <button
               key={item.id}
@@ -1499,7 +1647,8 @@ function App({
                 {itemLocked ? <Lock size={18} /> : <Icon size={20} />}
                 {!itemLocked &&
                   ((item.id === "notifications" && unreadNotifCount > 0) ||
-                    (item.id === "messages" && unreadChatCount > 0)) && (
+                    (item.id === "messages" &&
+                      (unreadChatCount > 0 || checkInPendingThreads.length > 0))) && (
                     <span className="mobile-nav-dot" />
                   )}
               </span>
@@ -2304,6 +2453,22 @@ function formatChatClock(ms: number) {
   }).format(new Date(ms));
 }
 
+function formatElapsedQuietArabic(ms: number) {
+  const totalMinutes = Math.max(0, Math.floor(ms / 60_000));
+  if (totalMinutes < 60) {
+    return `منذ ${formatArabicNumber(Math.max(1, totalMinutes))} د`;
+  }
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) {
+    return `منذ ${formatArabicNumber(totalHours)} س`;
+  }
+  const days = Math.floor(totalHours / 24);
+  const remHours = totalHours % 24;
+  return remHours > 0
+    ? `منذ ${formatArabicNumber(days)} ي و${formatArabicNumber(remHours)} س`
+    : `منذ ${formatArabicNumber(days)} يوم`;
+}
+
 function MessagesContent(props: {
   currentUserId: string;
   chats: ChatThread[];
@@ -2314,18 +2479,37 @@ function MessagesContent(props: {
   messageText: string;
   setMessageText: (value: string) => void;
   sendingMessage: boolean;
+  dealActionBusyId: string | null;
   onSend: () => void;
+  onMarkNotDelivered: (req: ConnectionRequestRecord) => void;
+  onConfirmDelivery: (req: ConnectionRequestRecord) => void;
+  onCancelDeal: (req: ConnectionRequestRecord) => void;
 }) {
   const [mobileListOpen, setMobileListOpen] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<"deliver" | "cancel" | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const currentThread =
     props.chats.find((chat) => chat.id === props.activeChat) ?? props.chats[0] ?? null;
 
   useEffect(() => {
+    setConfirmAction(null);
+  }, [currentThread?.id, currentThread?.dealStatus]);
+
+  useEffect(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [currentThread?.id, props.messages.length]);
+  }, [
+    currentThread?.id,
+    currentThread?.dealStatus,
+    currentThread?.needsDeliveryCheckIn,
+    props.messages.length,
+  ]);
+
+  const isBusy = Boolean(currentThread && props.dealActionBusyId === currentThread.id);
+  const isDelivered = currentThread?.dealStatus === "delivered";
+  const isCancelled = currentThread?.dealStatus === "cancelled";
+  const isActiveDeal = currentThread?.dealStatus === "active";
 
   return (
     <section className={`messages-panel ${mobileListOpen ? "mobile-list-open" : ""}`}>
@@ -2348,7 +2532,15 @@ function MessagesContent(props: {
               <div className="chat-preview-copy">
                 <div>
                   <strong>{chat.name}</strong>
-                  {chat.hasUnread && <span className="chat-unread-dot" aria-label="رسالة جديدة" />}
+                  {chat.needsDeliveryCheckIn ? (
+                    <span className="deal-list-pill checkin">سلمت؟</span>
+                  ) : chat.dealStatus === "delivered" ? (
+                    <span className="deal-list-pill delivered">سُلّمت</span>
+                  ) : chat.dealStatus === "cancelled" ? (
+                    <span className="deal-list-pill cancelled">ملغاة</span>
+                  ) : (
+                    chat.hasUnread && <span className="chat-unread-dot" aria-label="رسالة جديدة" />
+                  )}
                   <time>{chat.time}</time>
                 </div>
                 <p>{chat.last}</p>
@@ -2377,10 +2569,125 @@ function MessagesContent(props: {
               <div className="chat-header-copy">
                 <strong>{currentThread.name}</strong>
                 <span>
-                  <span dir="ltr">@{currentThread.partnerUsername}</span> · متصل عبر قبول طلب التواصل
+                  <span dir="ltr">@{currentThread.partnerUsername}</span> ·{" "}
+                  {isDelivered
+                    ? "تم تأكيد التسليم"
+                    : isCancelled
+                      ? "معاملة ملغاة"
+                      : `آخر تفاعل ${formatElapsedQuietArabic(currentThread.inactiveDurationMs)}`}
                 </span>
               </div>
             </div>
+
+            <div className="deal-steps-bar" aria-label="خطوات المعاملة">
+              <div className="deal-steps-track">
+                <span className="deal-step done">١. القبول</span>
+                <span className="deal-step-sep">←</span>
+                <span
+                  className={`deal-step ${
+                    isActiveDeal ? "current" : isDelivered ? "done" : "cancelled"
+                  }`}
+                >
+                  ٢. التواصل والتنفيذ
+                </span>
+                <span className="deal-step-sep">←</span>
+                <span
+                  className={`deal-step ${
+                    isDelivered ? "done" : isCancelled ? "cancelled" : "upcoming"
+                  }`}
+                >
+                  ٣. {isDelivered ? "تم التسليم" : isCancelled ? "أُلغيت" : "التسليم أو الإلغاء"}
+                </span>
+              </div>
+
+              {isActiveDeal && !confirmAction && (
+                <div className="deal-header-actions">
+                  {currentThread.deliveryCheckStatus === "not_delivered" && (
+                    <span className="deal-snooze-tag">لسا مسلمش</span>
+                  )}
+                  <button
+                    type="button"
+                    className="deal-btn deliver"
+                    disabled={isBusy}
+                    onClick={() => setConfirmAction("deliver")}
+                  >
+                    <CheckCircle2 size={13} /> سلمت
+                  </button>
+                  <button
+                    type="button"
+                    className="deal-btn cancel"
+                    disabled={isBusy}
+                    onClick={() => setConfirmAction("cancel")}
+                  >
+                    <RotateCcw size={13} /> إلغاء المعاملة
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {isActiveDeal && confirmAction && (
+              <div className={`deal-confirm-bar ${confirmAction}`}>
+                <span>
+                  {confirmAction === "deliver"
+                    ? "تأكيد تسليم العمل؟ بعد التأكيد تُغلق المعاملة كمكتملة ولا تُرد الرسوم."
+                    : `تأكيد إلغاء المعاملة؟ سيتم إرجاع ${formatArabicNumber(currentThread.acceptedFeeEgp)} ج.م (ومعاملة واحدة) لمحفظة المستقل.`}
+                </span>
+                <div className="deal-confirm-buttons">
+                  <button
+                    type="button"
+                    className={`deal-btn ${confirmAction === "deliver" ? "deliver-solid" : "cancel-solid"}`}
+                    disabled={isBusy}
+                    onClick={() => {
+                      const action = confirmAction;
+                      setConfirmAction(null);
+                      if (action === "deliver") {
+                        props.onConfirmDelivery(currentThread.request);
+                      } else {
+                        props.onCancelDeal(currentThread.request);
+                      }
+                    }}
+                  >
+                    {isBusy ? (
+                      <LoaderCircle className="spin" size={13} />
+                    ) : confirmAction === "deliver" ? (
+                      "نعم، تأكيد التسليم"
+                    ) : (
+                      "تأكيد الإلغاء والاسترداد"
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    className="deal-btn subtle"
+                    disabled={isBusy}
+                    onClick={() => setConfirmAction(null)}
+                  >
+                    تراجع
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {isDelivered && (
+              <div className="deal-terminal-banner delivered">
+                <CheckCircle2 size={15} />
+                <span>
+                  تم تأكيد التسليم — المعاملة مكتملة، والرسوم المخصومة غير قابلة للاسترداد بعد التسليم.
+                </span>
+              </div>
+            )}
+
+            {isCancelled && (
+              <div className="deal-terminal-banner cancelled">
+                <RotateCcw size={15} />
+                <span>
+                  تم إلغاء المعاملة قبل التسليم
+                  {typeof currentThread.refundedAmountEgp === "number" &&
+                  currentThread.refundedAmountEgp > 0
+                    ? ` — عادت ${formatArabicNumber(currentThread.refundedAmountEgp)} ج.م ومعاملة واحدة إلى محفظة المستقل.`
+                    : "."}
+                </span>
+              </div>
+            )}
 
             <div className="chat-messages-scroll" ref={scrollContainerRef}>
               <div className="chat-notice">
@@ -2420,35 +2727,89 @@ function MessagesContent(props: {
                   );
                 })
               )}
+
+              {currentThread.needsDeliveryCheckIn && isActiveDeal && (
+                <div className="deal-checkin-card" role="region" aria-label="متابعة حالة التسليم">
+                  <div className="deal-checkin-head">
+                    <Clock size={16} />
+                    <strong>
+                      مرّت ٢٤ ساعة بدون رسائل بين الطرفين — هل تم تسليم العمل؟
+                    </strong>
+                  </div>
+                  <p>
+                    سلمت؟ يمكنك تأكيد التسليم لإتمام المعاملة (لا تُرد الرسوم بعد التسليم)، أو
+                    اختيار «لسا مسلمش»، أو إلغاء المعاملة لإرجاع{" "}
+                    {formatArabicNumber(currentThread.acceptedFeeEgp)} ج.م لمحفظة المستقل.
+                  </p>
+                  <div className="deal-checkin-actions">
+                    <button
+                      type="button"
+                      className="deal-btn deliver-solid"
+                      disabled={isBusy}
+                      onClick={() => props.onConfirmDelivery(currentThread.request)}
+                    >
+                      {isBusy ? (
+                        <LoaderCircle className="spin" size={14} />
+                      ) : (
+                        <CheckCircle2 size={14} />
+                      )}
+                      سلمت ✓
+                    </button>
+                    <button
+                      type="button"
+                      className="deal-btn subtle"
+                      disabled={isBusy}
+                      onClick={() => props.onMarkNotDelivered(currentThread.request)}
+                    >
+                      لسا مسلمش
+                    </button>
+                    <button
+                      type="button"
+                      className="deal-btn cancel"
+                      disabled={isBusy}
+                      onClick={() => setConfirmAction("cancel")}
+                    >
+                      <RotateCcw size={13} /> إلغاء المعاملة (استرداد{" "}
+                      {formatArabicNumber(currentThread.acceptedFeeEgp)} ج.م)
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
-            <form
-              className="chat-compose"
-              onSubmit={(event) => {
-                event.preventDefault();
-                props.onSend();
-              }}
-            >
-              <input
-                value={props.messageText}
-                maxLength={1000}
-                disabled={props.sendingMessage}
-                onChange={(event) => props.setMessageText(event.target.value)}
-                placeholder={`اكتب رسالة إلى ${currentThread.name}...`}
-              />
-              <button
-                type="submit"
-                className="send-button"
-                disabled={props.sendingMessage || !props.messageText.trim()}
-                aria-label="إرسال"
+            {isCancelled ? (
+              <div className="deal-closed-composer">
+                تم إغلاق المحادثة وإلغاء المعاملة — أُعيدت الرسوم لمحفظة المستقل.
+              </div>
+            ) : (
+              <form
+                className="chat-compose"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  props.onSend();
+                }}
               >
-                {props.sendingMessage ? (
-                  <LoaderCircle className="spin" size={16} />
-                ) : (
-                  <Send size={17} />
-                )}
-              </button>
-            </form>
+                <input
+                  value={props.messageText}
+                  maxLength={1000}
+                  disabled={props.sendingMessage}
+                  onChange={(event) => props.setMessageText(event.target.value)}
+                  placeholder={`اكتب رسالة إلى ${currentThread.name}...`}
+                />
+                <button
+                  type="submit"
+                  className="send-button"
+                  disabled={props.sendingMessage || !props.messageText.trim()}
+                  aria-label="إرسال"
+                >
+                  {props.sendingMessage ? (
+                    <LoaderCircle className="spin" size={16} />
+                  ) : (
+                    <Send size={17} />
+                  )}
+                </button>
+              </form>
+            )}
           </>
         ) : (
           <div className="empty-state" style={{ margin: "auto 0" }}>
@@ -2464,6 +2825,7 @@ function NotificationsContent({
   currentUserId,
   notifications,
   requestsById,
+  checkInPendingThreads,
   respondingRequestId,
   browserNotifPermission,
   onEnableBrowserNotifs,
@@ -2476,6 +2838,7 @@ function NotificationsContent({
   currentUserId: string;
   notifications: NotificationRecord[];
   requestsById: Record<string, ConnectionRequestRecord>;
+  checkInPendingThreads: ChatThread[];
   respondingRequestId: string | null;
   browserNotifPermission: NotificationPermission;
   onEnableBrowserNotifs: () => void;
@@ -2530,6 +2893,31 @@ function NotificationsContent({
         )}
       </div>
 
+      {checkInPendingThreads.length > 0 && (
+        <div className="deal-checkin-card">
+          <div className="deal-checkin-head">
+            <Clock size={16} />
+            <strong>
+              لديك {formatArabicNumber(checkInPendingThreads.length)} محادثة مرّ عليها ٢٤ ساعة دون
+              تفاعل — سلمت؟
+            </strong>
+          </div>
+          <p>افتح المحادثة لاختيار «سلمت» أو «لسا مسلمش» أو إلغاء المعاملة واسترداد الرسوم:</p>
+          <div className="deal-checkin-actions">
+            {checkInPendingThreads.map((thread) => (
+              <button
+                key={thread.id}
+                type="button"
+                className="deal-btn subtle"
+                onClick={() => onOpenMessages(thread.id)}
+              >
+                <MessageCircle size={13} /> {thread.name} (سلمت؟)
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="notif-toolbar">
         <div className="filter-row" style={{ marginBottom: 0, flexWrap: "wrap" }}>
           <button
@@ -2582,16 +2970,16 @@ function NotificationsContent({
               >
                 <div
                   className={`notif-card-icon ${
-                    notif.type === "request_accepted"
+                    notif.type === "request_accepted" || notif.type === "deal_delivered"
                       ? "accepted"
-                      : notif.type === "request_declined"
+                      : notif.type === "request_declined" || notif.type === "deal_cancelled"
                         ? "declined"
                         : ""
                   }`}
                 >
-                  {notif.type === "request_accepted" ? (
+                  {notif.type === "request_accepted" || notif.type === "deal_delivered" ? (
                     <Check size={18} />
-                  ) : notif.type === "request_declined" ? (
+                  ) : notif.type === "request_declined" || notif.type === "deal_cancelled" ? (
                     <X size={18} />
                   ) : (
                     <BellRing size={18} />
@@ -2610,12 +2998,22 @@ function NotificationsContent({
 
                   <div className="notif-card-actions">
                     {relatedRequest && (
-                      <span className={`notif-status-tag ${relatedRequest.status}`}>
-                        {relatedRequest.status === "accepted"
-                          ? "تم قبول الطلب"
-                          : relatedRequest.status === "declined"
-                            ? "تم الاعتذار عن الطلب"
-                            : "بانتظار الرد"}
+                      <span
+                        className={`notif-status-tag ${
+                          relatedRequest.deal_status === "cancelled"
+                            ? "declined"
+                            : relatedRequest.status
+                        }`}
+                      >
+                        {relatedRequest.deal_status === "delivered"
+                          ? "تم التسليم"
+                          : relatedRequest.deal_status === "cancelled"
+                            ? "أُلغيت المعاملة"
+                            : relatedRequest.status === "accepted"
+                              ? "تم قبول الطلب"
+                              : relatedRequest.status === "declined"
+                                ? "تم الاعتذار عن الطلب"
+                                : "بانتظار الرد"}
                       </span>
                     )}
 
