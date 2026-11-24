@@ -25,6 +25,9 @@ export interface DakhlProfile {
   skills: string[];
   interests: string[];
   has_balance?: boolean;
+  wallet_priority?: number;
+  review_score?: number;
+  review_count?: number;
   account_type?: AccountType;
 }
 

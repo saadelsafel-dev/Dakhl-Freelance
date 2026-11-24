@@ -49,6 +49,7 @@ import {
 } from "./lib/media";
 import {
   approveTopupRequest,
+  computeWalletPriority,
   formatArabicDate,
   manualCreditWallet,
   mapConnectionRequestDoc,
@@ -94,16 +95,6 @@ type Section =
   | "profile"
   | "admin";
 
-type Person = {
-  id: string;
-  name: string;
-  role: string;
-  location: string;
-  skills: string[];
-  avatar: string;
-  tone: string;
-};
-
 type Opportunity = {
   id: string;
   title: string;
@@ -126,7 +117,30 @@ type ChatThread = {
   initialMessage?: string;
 };
 
-const people: Person[] = [];
+const DIRECTORY_CATEGORIES: { id: string; keywords: string[] }[] = [
+  { id: "الكل", keywords: [] },
+  { id: "تصميم", keywords: ["تصميم", "ui", "ux", "جرافيك"] },
+  { id: "برمجة وتطوير", keywords: ["برمجة", "تطوير", "ويب", "تطبيق"] },
+  { id: "كتابة ومحتوى", keywords: ["كتابة", "محتوى"] },
+  { id: "تسويق", keywords: ["تسويق", "تواصل"] },
+  { id: "ترجمة", keywords: ["ترجمة"] },
+  { id: "تصوير ومونتاج", keywords: ["تصوير", "مونتاج", "فيديو"] },
+  { id: "إدخال بيانات", keywords: ["إدخال", "بيانات"] },
+  { id: "خدمة عملاء", keywords: ["خدمة", "عملاء"] },
+  { id: "تعليم وإدارة", keywords: ["تعليم", "تدريب", "إدارية"] },
+];
+
+function matchesDirectoryCategory(member: DakhlProfile, categoryId: string): boolean {
+  if (categoryId === "الكل") return true;
+  const tags = [...member.skills, ...member.interests].map((item) => item.toLowerCase());
+  const preset = DIRECTORY_CATEGORIES.find((item) => item.id === categoryId);
+  if (preset) {
+    return preset.keywords.some((kw) => tags.some((tag) => tag.includes(kw)));
+  }
+  const normalized = categoryId.trim().toLowerCase();
+  return tags.some((tag) => tag.includes(normalized));
+}
+
 const opportunities: Opportunity[] = [];
 
 const baseNavItems: { id: Section; label: string; icon: typeof House }[] = [
@@ -198,6 +212,7 @@ function App({
   const [missingAccountTypeIds, setMissingAccountTypeIds] = useState<Record<string, boolean>>({});
   const [fundedProfiles, setFundedProfiles] = useState<DakhlProfile[]>([]);
   const syncedBalanceFlagsRef = useRef<Record<string, boolean>>({});
+  const syncedWalletPriorityRef = useRef<Record<string, number>>({});
   const syncedAccountTypeRef = useRef<Record<string, boolean>>({});
   const [receiptPreviewUrl, setReceiptPreviewUrl] = useState<string | null>(null);
   const [lightboxImage, setLightboxImage] = useState<{ url: string; title: string } | null>(null);
@@ -460,7 +475,7 @@ function App({
         const missingMap: Record<string, boolean> = {};
         const list: DakhlProfile[] = snapshot.docs.map((d) => {
           const data = d.data();
-          if (typeof data.account_type !== "string") {
+          if (typeof data.account_type !== "string" || !data.account_type.trim()) {
             missingMap[d.id] = true;
           }
           return mapProfileDoc(d.id, data);
@@ -489,22 +504,36 @@ function App({
     if (!isSuperUser || !adminWalletsReady) return;
 
     for (const userProfile of adminProfiles) {
+      if (!userProfile.profile_completed) continue;
       const userWallet = adminWallets[userProfile.id];
       const isClientProfile = userProfile.account_type === "client";
       const expectedHasBalance = isClientProfile
         ? false
         : (userWallet?.balance_egp ?? 0) > 0 || (userWallet?.remaining_transactions ?? 0) > 0;
+      const expectedWalletPriority = isClientProfile
+        ? 0
+        : computeWalletPriority(
+            userWallet?.balance_egp ?? 0,
+            userWallet?.remaining_transactions ?? 0,
+          );
       const currentFlag = Boolean(userProfile.has_balance);
+      const currentPriority = userProfile.wallet_priority ?? 0;
       const needsBalanceSync =
         currentFlag !== expectedHasBalance &&
         syncedBalanceFlagsRef.current[userProfile.id] !== expectedHasBalance;
+      const needsPrioritySync =
+        currentPriority !== expectedWalletPriority &&
+        syncedWalletPriorityRef.current[userProfile.id] !== expectedWalletPriority;
       const needsTypeBackfill =
         Boolean(missingAccountTypeIds[userProfile.id]) &&
         !syncedAccountTypeRef.current[userProfile.id];
 
-      if (needsBalanceSync || needsTypeBackfill) {
+      if (needsBalanceSync || needsPrioritySync || needsTypeBackfill) {
         if (needsBalanceSync) {
           syncedBalanceFlagsRef.current[userProfile.id] = expectedHasBalance;
+        }
+        if (needsPrioritySync) {
+          syncedWalletPriorityRef.current[userProfile.id] = expectedWalletPriority;
         }
         if (needsTypeBackfill) {
           syncedAccountTypeRef.current[userProfile.id] = true;
@@ -513,6 +542,7 @@ function App({
           userProfile.id,
           expectedHasBalance,
           needsTypeBackfill,
+          expectedWalletPriority,
         ).catch((error: unknown) => {
           console.error("Background profile sync skipped for user:", userProfile.id, error);
         });
@@ -548,19 +578,61 @@ function App({
     return () => unsubFunded();
   }, [isSuperUser, isLocked]);
 
-  const filteredPeople = useMemo(() => {
+  const visibleDirectoryProfiles = useMemo(() => {
+    const source = isSuperUser ? adminProfiles : fundedProfiles;
+    const list = source.filter((member) => {
+      if (member.account_type === "client") return false;
+      if (isSuperUser) {
+        const w = adminWallets[member.id];
+        return (w?.balance_egp ?? 0) > 0 || (w?.remaining_transactions ?? 0) > 0;
+      }
+      return Boolean(member.has_balance);
+    });
+    return [...list].sort((a, b) => {
+      // 1) Review priority (average rating, then review count)
+      const aHasReviews = (a.review_count ?? 0) > 0 && (a.review_score ?? 0) > 0;
+      const bHasReviews = (b.review_count ?? 0) > 0 && (b.review_score ?? 0) > 0;
+      const aReviewScore = aHasReviews ? (a.review_score ?? 0) : 0;
+      const bReviewScore = bHasReviews ? (b.review_score ?? 0) : 0;
+      if (bReviewScore !== aReviewScore) return bReviewScore - aReviewScore;
+
+      const aReviewCount = a.review_count ?? 0;
+      const bReviewCount = b.review_count ?? 0;
+      if (bReviewCount !== aReviewCount) return bReviewCount - aReviewCount;
+
+      // 2) Wallet balance priority (highest wallet balance first)
+      const aWalletScore = isSuperUser
+        ? computeWalletPriority(
+            adminWallets[a.id]?.balance_egp ?? 0,
+            adminWallets[a.id]?.remaining_transactions ?? 0,
+          )
+        : (a.wallet_priority ?? 0);
+      const bWalletScore = isSuperUser
+        ? computeWalletPriority(
+            adminWallets[b.id]?.balance_egp ?? 0,
+            adminWallets[b.id]?.remaining_transactions ?? 0,
+          )
+        : (b.wallet_priority ?? 0);
+      if (bWalletScore !== aWalletScore) return bWalletScore - aWalletScore;
+
+      // 3) Projects count, then display name
+      const projectDiff = (b.projects?.length ?? 0) - (a.projects?.length ?? 0);
+      if (projectDiff !== 0) return projectDiff;
+      return a.display_name.localeCompare(b.display_name, "ar");
+    });
+  }, [isSuperUser, adminProfiles, fundedProfiles, adminWallets]);
+
+  const filteredDirectoryProfiles = useMemo(() => {
     const queryText = search.trim().toLowerCase();
-    return people.filter((person) => {
-      const matchesSearch =
-        !queryText ||
-        `${person.name} ${person.role} ${person.location} ${person.skills.join(" ")}`
-          .toLowerCase()
-          .includes(queryText);
-      const matchesFilter =
-        activeFilter === "الكل" || person.skills.some((skill) => skill.includes(activeFilter));
+    return visibleDirectoryProfiles.filter((member) => {
+      const tags = [...member.skills, ...member.interests];
+      const haystack =
+        `${member.display_name} ${member.username} ${member.city ?? ""} ${member.governorate ?? ""} ${member.bio ?? ""} ${tags.join(" ")}`.toLowerCase();
+      const matchesSearch = !queryText || haystack.includes(queryText);
+      const matchesFilter = matchesDirectoryCategory(member, activeFilter);
       return matchesSearch && matchesFilter;
     });
-  }, [activeFilter, search]);
+  }, [visibleDirectoryProfiles, activeFilter, search]);
 
   const showToast = (message: string) => {
     setToast(message);
@@ -593,14 +665,6 @@ function App({
     }
     setConnectTarget(member);
     setDialog("connect");
-  };
-
-  const openPersonConnection = (person: Person) => {
-    const matched =
-      (isSuperUser ? adminProfiles : fundedProfiles).find((item) => item.id === person.id) ?? null;
-    if (matched) {
-      openConnection(matched);
-    }
   };
 
   const openPublish = () => {
@@ -995,9 +1059,12 @@ function App({
                   setSearch={setSearch}
                   activeFilter={activeFilter}
                   setActiveFilter={setActiveFilter}
-                  filteredPeople={filteredPeople}
+                  filteredMembers={filteredDirectoryProfiles}
+                  outgoingStatusByTarget={outgoingStatusByTarget}
                   setSection={navigateTo}
-                  onConnect={openPersonConnection}
+                  onConnect={(member) => openConnection(member)}
+                  onOpenMessages={() => navigateTo("messages")}
+                  onPreviewProfile={setPreviewProfile}
                   saved={saved}
                   setSaved={setSaved}
                   onPublish={openPublish}
@@ -1006,11 +1073,16 @@ function App({
               )}
               {effectiveSection === "discover" && (
                 <DiscoverContent
+                  currentUserId={profile.id}
                   activeFilter={activeFilter}
                   setActiveFilter={setActiveFilter}
-                  people={filteredPeople}
+                  members={filteredDirectoryProfiles}
                   search={search}
-                  onConnect={openPersonConnection}
+                  setSearch={setSearch}
+                  outgoingStatusByTarget={outgoingStatusByTarget}
+                  onConnect={(member) => openConnection(member)}
+                  onOpenMessages={() => navigateTo("messages")}
+                  onPreviewProfile={setPreviewProfile}
                   saved={saved}
                   setSaved={setSaved}
                 />
@@ -1033,7 +1105,7 @@ function App({
                 <AssignContent
                   currentUserId={profile.id}
                   isSuperUser={isSuperUser}
-                  profiles={isSuperUser ? adminProfiles : fundedProfiles}
+                  profiles={visibleDirectoryProfiles}
                   wallets={adminWallets}
                   outgoingStatusByTarget={outgoingStatusByTarget}
                   search={search}
@@ -1379,15 +1451,18 @@ function HomeContent(props: {
   setSearch: (value: string) => void;
   activeFilter: string;
   setActiveFilter: (value: string) => void;
-  filteredPeople: Person[];
+  filteredMembers: DakhlProfile[];
+  outgoingStatusByTarget: Record<string, ConnectionRequestStatus>;
   setSection: (section: Section) => void;
-  onConnect: (person: Person) => void;
+  onConnect: (member: DakhlProfile) => void;
+  onOpenMessages: () => void;
+  onPreviewProfile: (member: DakhlProfile) => void;
   saved: string[];
   setSaved: (value: string[] | ((current: string[]) => string[])) => void;
   onPublish: () => void;
   onOpenOpportunity: () => void;
 }) {
-  const filters = ["الكل", "تصميم", "كتابة", "تطوير"];
+  const filters = DIRECTORY_CATEGORIES.slice(0, 6).map((item) => item.id);
   const profileLocation =
     [props.profile.city, props.profile.governorate].filter(Boolean).join("، ") || "ملفك الشخصي";
   const badgeItems =
@@ -1450,7 +1525,7 @@ function HomeContent(props: {
             اكتشف الجميع <ArrowLeft size={15} />
           </button>
         </div>
-        <div className="filter-row">
+        <div className="filter-row" style={{ flexWrap: "wrap" }}>
           <label className="inline-search">
             <Search size={16} />
             <input
@@ -1470,26 +1545,30 @@ function HomeContent(props: {
           ))}
         </div>
         <div className="people-grid">
-          {props.filteredPeople.slice(0, 3).map((person) => (
-            <PersonCard
-              key={person.id}
-              person={person}
-              onConnect={props.onConnect}
-              saved={props.saved.includes(person.id)}
-              onSave={() =>
+          {props.filteredMembers.slice(0, 3).map((member) => (
+            <MemberDirectoryCard
+              key={member.id}
+              member={member}
+              currentUserId={props.profile.id}
+              outgoingStatus={props.outgoingStatusByTarget[member.id]}
+              saved={props.saved.includes(member.id)}
+              onToggleSave={() =>
                 props.setSaved((current) =>
-                  current.includes(person.id)
-                    ? current.filter((id) => id !== person.id)
-                    : [...current, person.id],
+                  current.includes(member.id)
+                    ? current.filter((id) => id !== member.id)
+                    : [...current, member.id],
                 )
               }
+              onConnect={props.onConnect}
+              onOpenMessages={props.onOpenMessages}
+              onPreviewProfile={props.onPreviewProfile}
             />
           ))}
-          {props.filteredPeople.length === 0 && (
+          {props.filteredMembers.length === 0 && (
             <div className="empty-state">
               {props.search.trim() || props.activeFilter !== "الكل"
                 ? "لا توجد نتائج مطابقة. جرّب كلمة بحث أخرى."
-                : "لا يوجد أعضاء مسجلون للعرض حاليًا."}
+                : "لا يوجد أعضاء متاحون للعرض حاليًا."}
             </div>
           )}
         </div>
@@ -1521,46 +1600,63 @@ function HomeContent(props: {
 }
 
 function DiscoverContent(props: {
+  currentUserId: string;
   activeFilter: string;
   setActiveFilter: (value: string) => void;
-  people: Person[];
+  members: DakhlProfile[];
   search: string;
-  onConnect: (person: Person) => void;
+  setSearch: (value: string) => void;
+  outgoingStatusByTarget: Record<string, ConnectionRequestStatus>;
+  onConnect: (member: DakhlProfile) => void;
+  onOpenMessages: () => void;
+  onPreviewProfile: (member: DakhlProfile) => void;
   saved: string[];
   setSaved: (value: string[] | ((current: string[]) => string[])) => void;
 }) {
   return (
-    <section className="section-block discover-page">
+    <section className="section-block discover-page" style={{ marginTop: 0 }}>
       <div className="discover-toolbar">
-        <div className="filter-row">
-          {["الكل", "تصميم", "كتابة", "تطوير"].map((filter) => (
+        <div className="filter-row" style={{ flexWrap: "wrap", width: "100%" }}>
+          <label className="inline-search">
+            <Search size={16} />
+            <input
+              value={props.search}
+              onChange={(event) => props.setSearch(event.target.value)}
+              placeholder="ابحث بالاسم، التخصص، أو المهارة"
+            />
+          </label>
+          {DIRECTORY_CATEGORIES.map((category) => (
             <button
-              key={filter}
-              className={`filter-chip ${props.activeFilter === filter ? "selected" : ""}`}
-              onClick={() => props.setActiveFilter(filter)}
+              key={category.id}
+              className={`filter-chip ${props.activeFilter === category.id ? "selected" : ""}`}
+              onClick={() => props.setActiveFilter(category.id)}
             >
-              {filter}
+              {category.id}
             </button>
           ))}
         </div>
       </div>
       <div className="people-grid">
-        {props.people.map((person) => (
-          <PersonCard
-            key={person.id}
-            person={person}
-            onConnect={props.onConnect}
-            saved={props.saved.includes(person.id)}
-            onSave={() =>
+        {props.members.map((member) => (
+          <MemberDirectoryCard
+            key={member.id}
+            member={member}
+            currentUserId={props.currentUserId}
+            outgoingStatus={props.outgoingStatusByTarget[member.id]}
+            saved={props.saved.includes(member.id)}
+            onToggleSave={() =>
               props.setSaved((current) =>
-                current.includes(person.id)
-                  ? current.filter((id) => id !== person.id)
-                  : [...current, person.id],
+                current.includes(member.id)
+                  ? current.filter((id) => id !== member.id)
+                  : [...current, member.id],
               )
             }
+            onConnect={props.onConnect}
+            onOpenMessages={props.onOpenMessages}
+            onPreviewProfile={props.onPreviewProfile}
           />
         ))}
-        {props.people.length === 0 && (
+        {props.members.length === 0 && (
           <div className="empty-state">
             {props.search.trim() || props.activeFilter !== "الكل"
               ? "لا توجد نتائج مطابقة لهذا التصنيف."
@@ -1572,46 +1668,99 @@ function DiscoverContent(props: {
   );
 }
 
-function PersonCard({
-  person,
-  onConnect,
+function MemberDirectoryCard({
+  member,
+  currentUserId,
+  outgoingStatus,
   saved,
-  onSave,
+  onToggleSave,
+  onConnect,
+  onOpenMessages,
+  onPreviewProfile,
 }: {
-  person: Person;
-  onConnect: (person: Person) => void;
+  member: DakhlProfile;
+  currentUserId: string;
+  outgoingStatus?: ConnectionRequestStatus;
   saved: boolean;
-  onSave: () => void;
+  onToggleSave: () => void;
+  onConnect: (member: DakhlProfile) => void;
+  onOpenMessages: () => void;
+  onPreviewProfile: (member: DakhlProfile) => void;
 }) {
+  const locationText = [member.city, member.governorate].filter(Boolean).join("، ") || "غير محدد";
+  const tags = Array.from(new Set([...member.skills, ...member.interests]));
+
   return (
     <article className="person-card">
       <div className="person-card-top">
-        <div className={`person-avatar ${person.tone}`}>{person.avatar}</div>
+        <div className="person-avatar blue" style={{ overflow: "hidden" }}>
+          {member.avatar_url ? (
+            <img
+              src={member.avatar_url}
+              alt={member.display_name}
+              style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "50%" }}
+            />
+          ) : (
+            getInitials(member.display_name)
+          )}
+        </div>
         <button
           className={`save-button ${saved ? "saved" : ""}`}
           aria-label={saved ? "إزالة من المحفوظات" : "حفظ الملف"}
-          onClick={onSave}
+          onClick={onToggleSave}
         >
           <Heart size={17} fill={saved ? "currentColor" : "none"} />
         </button>
       </div>
       <div className="person-name-row">
-        <h3>{person.name}</h3>
+        <h3>{member.display_name}</h3>
       </div>
-      <p className="person-role">{person.role}</p>
+      <p className="person-role">
+        @{member.username} · {experienceLabel(member.experience_level)}
+      </p>
       <div className="person-location">
         <MapPin size={14} />
-        {person.location}
+        {locationText}
+        {(member.projects?.length ?? 0) > 0 && (
+          <span style={{ marginRight: "auto", color: "#24543c", fontWeight: 600 }}>
+            {formatArabicNumber(member.projects?.length ?? 0)} مشاريع
+          </span>
+        )}
       </div>
       <div className="skill-list">
-        {person.skills.map((skill) => (
+        {tags.slice(0, 4).map((skill) => (
           <span key={skill}>{skill}</span>
         ))}
       </div>
       <div className="person-card-footer">
-        <button className="connect-button" onClick={() => onConnect(person)}>
-          تواصل <ArrowLeft size={14} />
+        <button
+          type="button"
+          className="connect-button"
+          onClick={() => onPreviewProfile(member)}
+        >
+          <Eye size={14} /> عرض الأعمال
         </button>
+        {member.id === currentUserId ? (
+          <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 600 }}>
+            ملفك الشخصي
+          </span>
+        ) : outgoingStatus === "accepted" ? (
+          <button
+            type="button"
+            className="connect-button"
+            onClick={onOpenMessages}
+          >
+            تم القبول · المحادثات <ArrowLeft size={14} />
+          </button>
+        ) : outgoingStatus === "pending" ? (
+          <span style={{ fontSize: 10, color: "#67766c", fontWeight: 600 }}>
+            تم إرسال الطلب
+          </span>
+        ) : (
+          <button className="connect-button" onClick={() => onConnect(member)}>
+            تواصل <ArrowLeft size={14} />
+          </button>
+        )}
       </div>
     </article>
   );
@@ -1646,7 +1795,6 @@ function AssignContent({
   onPreviewProfile: (member: DakhlProfile) => void;
   onOpenManualCredit: (target: DakhlProfile) => void;
 }) {
-  const [balanceFilter, setBalanceFilter] = useState<"all" | "zero" | "funded">("all");
   const [skillFilter, setSkillFilter] = useState("الكل");
 
   const visibleMembers = useMemo(() => {
@@ -1658,22 +1806,17 @@ function AssignContent({
         ? (userWallet?.balance_egp ?? 0) > 0 || (userWallet?.remaining_transactions ?? 0) > 0
         : Boolean(member.has_balance);
 
-      if (!isSuperUser && !hasBalance) return false;
-      if (isSuperUser && balanceFilter === "zero" && hasBalance) return false;
-      if (isSuperUser && balanceFilter === "funded" && !hasBalance) return false;
+      if (!hasBalance) return false;
 
-      const tags = member.skills.length > 0 ? member.skills : member.interests;
-      const matchesSkill =
-        isSuperUser ||
-        skillFilter === "الكل" ||
-        tags.some((item) => item.includes(skillFilter));
+      const tags = [...member.skills, ...member.interests];
+      const matchesSkill = matchesDirectoryCategory(member, skillFilter);
 
       const haystack = `${member.display_name} ${member.username} ${member.city ?? ""} ${member.governorate ?? ""} ${member.bio ?? ""} ${tags.join(" ")}`.toLowerCase();
       const matchesSearch = !queryText || haystack.includes(queryText);
 
       return matchesSkill && matchesSearch;
     });
-  }, [profiles, wallets, isSuperUser, balanceFilter, skillFilter, search]);
+  }, [profiles, wallets, isSuperUser, skillFilter, search]);
 
   return (
     <section className="section-block discover-page" style={{ marginTop: 0 }}>
@@ -1687,35 +1830,15 @@ function AssignContent({
               placeholder="ابحث بالاسم، اسم المستخدم، أو المهارة"
             />
           </label>
-          {isSuperUser ? (
-            <>
-              {(
-                [
-                  { id: "all", label: "الكل" },
-                  { id: "zero", label: "رصيد ٠ (للإدارة فقط)" },
-                  { id: "funded", label: "معاهم رصيد (ظاهر للجميع)" },
-                ] as const
-              ).map((chip) => (
-                <button
-                  key={chip.id}
-                  className={`filter-chip ${balanceFilter === chip.id ? "selected" : ""}`}
-                  onClick={() => setBalanceFilter(chip.id)}
-                >
-                  {chip.label}
-                </button>
-              ))}
-            </>
-          ) : (
-            ["الكل", "تصميم", "كتابة", "تطوير"].map((filter) => (
-              <button
-                key={filter}
-                className={`filter-chip ${skillFilter === filter ? "selected" : ""}`}
-                onClick={() => setSkillFilter(filter)}
-              >
-                {filter}
-              </button>
-            ))
-          )}
+          {DIRECTORY_CATEGORIES.map((category) => (
+            <button
+              key={category.id}
+              className={`filter-chip ${skillFilter === category.id ? "selected" : ""}`}
+              onClick={() => setSkillFilter(category.id)}
+            >
+              {category.id}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -1848,11 +1971,9 @@ function AssignContent({
         })}
         {visibleMembers.length === 0 && (
           <div className="empty-state">
-            {search.trim() || (isSuperUser ? balanceFilter !== "all" : skillFilter !== "الكل")
+            {search.trim() || skillFilter !== "الكل"
               ? "لا توجد نتائج مطابقة للبحث الحالي."
-              : isSuperUser
-                ? "لا يوجد مستقلون مسجلون بعد."
-                : "لا يوجد مستقلون لديهم رصيد متاح للعرض حاليًا."}
+              : "لا يوجد مستقلون لديهم رصيد متاح للعرض حاليًا."}
           </div>
         )}
       </div>

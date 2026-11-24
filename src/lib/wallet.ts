@@ -302,6 +302,9 @@ export async function approveTopupRequest(params: {
         const isClientProfile = profileSnap.data().account_type === "client";
         transaction.update(profileRef, {
           has_balance: isClientProfile ? false : nextHasBalance,
+          wallet_priority: isClientProfile
+            ? 0
+            : computeWalletPriority(nextBalance, nextRemaining),
           updatedAt: serverTimestamp(),
         });
       }
@@ -418,6 +421,9 @@ export async function manualCreditWallet(params: {
         const isClientProfile = profileSnap.data().account_type === "client";
         transaction.update(profileRef, {
           has_balance: isClientProfile ? false : nextHasBalance,
+          wallet_priority: isClientProfile
+            ? 0
+            : computeWalletPriority(nextBalance, nextRemaining),
           updatedAt: serverTimestamp(),
         });
       }
@@ -439,16 +445,26 @@ export async function manualCreditWallet(params: {
   }
 }
 
+export function computeWalletPriority(balanceEgp: number, remainingTransactions: number): number {
+  const safeBalance = Math.max(0, Math.min(10000000, Math.trunc(balanceEgp || 0)));
+  const safeTx = Math.max(0, Math.min(99, Math.trunc(remainingTransactions || 0)));
+  return safeBalance * 100 + safeTx;
+}
+
 export async function syncProfileBalanceVisibility(
   userId: string,
   hasBalance: boolean,
   backfillFreelancerType = false,
+  walletPriority?: number,
 ): Promise<void> {
   const profileRef = doc(db, "profiles", userId);
   const payload: Record<string, unknown> = {
     has_balance: hasBalance,
     updatedAt: serverTimestamp(),
   };
+  if (typeof walletPriority === "number" && Number.isFinite(walletPriority)) {
+    payload.wallet_priority = Math.max(0, Math.min(1000000100, Math.trunc(walletPriority)));
+  }
   if (backfillFreelancerType) {
     payload.account_type = "freelancer";
   }
@@ -595,6 +611,18 @@ export function mapProfileDoc(id: string, data: Record<string, unknown>): DakhlP
       ? data.interests.filter((s): s is string => typeof s === "string")
       : [],
     has_balance: Boolean(data.has_balance),
+    wallet_priority:
+      typeof data.wallet_priority === "number" && Number.isFinite(data.wallet_priority)
+        ? Math.max(0, Math.trunc(data.wallet_priority))
+        : 0,
+    review_score:
+      typeof data.review_score === "number" && Number.isFinite(data.review_score)
+        ? Math.max(0, Math.min(5, data.review_score))
+        : 0,
+    review_count:
+      typeof data.review_count === "number" && Number.isFinite(data.review_count)
+        ? Math.max(0, Math.trunc(data.review_count))
+        : 0,
     account_type: data.account_type === "client" ? "client" : "freelancer",
   };
 }

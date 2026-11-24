@@ -71,6 +71,18 @@
           "type": "boolean",
           "description": "Admin-controlled visibility flag indicating the user has wallet balance or transaction credits."
         },
+        "wallet_priority": {
+          "type": "integer",
+          "description": "Admin-synced wallet priority score used to rank directory profiles by wallet balance."
+        },
+        "review_score": {
+          "type": "number",
+          "description": "Average review rating (0-5) used as primary directory priority."
+        },
+        "review_count": {
+          "type": "integer",
+          "description": "Total completed review count."
+        },
         "account_type": {
           "type": "string",
           "description": "Account role chosen during signup ('freelancer' or 'client'); legacy profiles without this field default to 'freelancer'.",

@@ -87,6 +87,9 @@ service cloud.firestore {
           'skills',
           'interests',
           'has_balance',
+          'wallet_priority',
+          'review_score',
+          'review_count',
           'account_type',
           'createdAt',
           'updatedAt'
@@ -125,9 +128,35 @@ service cloud.firestore {
         && data.interests[0].size() >= 1
         && data.interests[0].size() <= 60
         && (!('has_balance' in data) || data.has_balance is bool)
+        && (!('wallet_priority' in data) || (data.wallet_priority is int && data.wallet_priority >= 0 && data.wallet_priority <= 1000000100))
+        && (!('review_score' in data) || (data.review_score is number && data.review_score >= 0 && data.review_score <= 5))
+        && (!('review_count' in data) || (data.review_count is int && data.review_count >= 0 && data.review_count <= 1000000))
         && (!('account_type' in data) || (data.account_type is string && data.account_type in ['freelancer', 'client']))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
+    }
+
+    function isValidAdminProfileSync(data, prev, userId) {
+      return isValidId(userId)
+        && data.updatedAt is timestamp
+        && data.updatedAt == request.time
+        && data.diff(prev).affectedKeys().hasOnly([
+          'has_balance',
+          'wallet_priority',
+          'review_score',
+          'review_count',
+          'account_type',
+          'updatedAt'
+        ])
+        && (!('has_balance' in data) || data.has_balance is bool)
+        && (!('has_balance' in data) || data.has_balance == false || !('account_type' in data) || data.account_type != 'client')
+        && (!('wallet_priority' in data) || (data.wallet_priority is int && data.wallet_priority >= 0 && data.wallet_priority <= 1000000100))
+        && (!('review_score' in data) || (data.review_score is number && data.review_score >= 0 && data.review_score <= 5))
+        && (!('review_count' in data) || (data.review_count is int && data.review_count >= 0 && data.review_count <= 1000000))
+        && (
+          !data.diff(prev).affectedKeys().hasAny(['account_type'])
+          || ((!('account_type' in prev) || prev.account_type == null || prev.account_type == '') && data.account_type == 'freelancer')
+        );
     }
 
     function isValidUsernameReservation(data) {
@@ -460,97 +489,91 @@ service cloud.firestore {
         && getAfter(/databases/$(database)/documents/usernames/$(incoming().username)).data.userId == userId;
       allow update: if isVerifiedUser()
         && isValidId(userId)
-        && isValidProfile(incoming(), userId)
-        && incoming().id == existing().id
-        && incoming().createdAt == existing().createdAt
-        && incoming().updatedAt == request.time
         && (
           (
-            isOwner(userId)
-            && incoming().diff(existing()).affectedKeys().hasOnly([
-              'display_name',
-              'avatar_url',
-              'cover_url',
-              'governorate',
-              'city',
-              'bio',
-              'portfolio_url',
-              'projects',
-              'experience_level',
-              'skills',
-              'interests',
-              'updatedAt'
-            ])
-          )
-          || (
-            isOwner(userId)
-            && incoming().diff(existing()).affectedKeys().hasOnly([
-              'username',
-              'display_name',
-              'avatar_url',
-              'cover_url',
-              'governorate',
-              'city',
-              'bio',
-              'portfolio_url',
-              'projects',
-              'experience_level',
-              'skills',
-              'interests',
-              'updatedAt'
-            ])
-            && existsAfter(/databases/$(database)/documents/usernames/$(incoming().username))
-            && getAfter(/databases/$(database)/documents/usernames/$(incoming().username)).data.userId == userId
-          )
-          || (
-            isOwner(userId)
-            && (!('profile_completed' in existing()) || existing().profile_completed == false)
-            && incoming().profile_completed == true
-            && (
-              !('account_type' in existing())
-              || incoming().account_type == existing().account_type
-            )
-            && incoming().diff(existing()).affectedKeys().hasOnly([
-              'username',
-              'display_name',
-              'avatar_url',
-              'cover_url',
-              'governorate',
-              'city',
-              'bio',
-              'portfolio_url',
-              'projects',
-              'experience_level',
-              'profile_completed',
-              'skills',
-              'interests',
-              'account_type',
-              'updatedAt'
-            ])
-            && existsAfter(/databases/$(database)/documents/usernames/$(incoming().username))
-            && getAfter(/databases/$(database)/documents/usernames/$(incoming().username)).data.userId == userId
-          )
-          || (
-            isOwner(userId)
-            && !('account_type' in existing())
-            && incoming().diff(existing()).affectedKeys().hasOnly([
-              'account_type',
-              'updatedAt'
-            ])
-            && incoming().account_type == 'freelancer'
-          )
-          || (
             isAdmin()
-            && incoming().diff(existing()).affectedKeys().hasOnly([
-              'has_balance',
-              'account_type',
-              'updatedAt'
-            ])
-            && (!('has_balance' in incoming()) || incoming().has_balance is bool)
-            && (!('has_balance' in incoming()) || incoming().has_balance == false || !('account_type' in incoming()) || incoming().account_type == 'freelancer')
+            && isValidAdminProfileSync(incoming(), existing(), userId)
+          )
+          || (
+            isValidProfile(incoming(), userId)
+            && incoming().id == existing().id
+            && incoming().createdAt == existing().createdAt
+            && incoming().updatedAt == request.time
             && (
-              !incoming().diff(existing()).affectedKeys().hasAny(['account_type'])
-              || (!('account_type' in existing()) && incoming().account_type == 'freelancer')
+              (
+                isOwner(userId)
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'display_name',
+                  'avatar_url',
+                  'cover_url',
+                  'governorate',
+                  'city',
+                  'bio',
+                  'portfolio_url',
+                  'projects',
+                  'experience_level',
+                  'skills',
+                  'interests',
+                  'updatedAt'
+                ])
+              )
+              || (
+                isOwner(userId)
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'username',
+                  'display_name',
+                  'avatar_url',
+                  'cover_url',
+                  'governorate',
+                  'city',
+                  'bio',
+                  'portfolio_url',
+                  'projects',
+                  'experience_level',
+                  'skills',
+                  'interests',
+                  'updatedAt'
+                ])
+                && existsAfter(/databases/$(database)/documents/usernames/$(incoming().username))
+                && getAfter(/databases/$(database)/documents/usernames/$(incoming().username)).data.userId == userId
+              )
+              || (
+                isOwner(userId)
+                && (!('profile_completed' in existing()) || existing().profile_completed == false)
+                && incoming().profile_completed == true
+                && (
+                  !('account_type' in existing())
+                  || incoming().account_type == existing().account_type
+                )
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'username',
+                  'display_name',
+                  'avatar_url',
+                  'cover_url',
+                  'governorate',
+                  'city',
+                  'bio',
+                  'portfolio_url',
+                  'projects',
+                  'experience_level',
+                  'profile_completed',
+                  'skills',
+                  'interests',
+                  'account_type',
+                  'updatedAt'
+                ])
+                && existsAfter(/databases/$(database)/documents/usernames/$(incoming().username))
+                && getAfter(/databases/$(database)/documents/usernames/$(incoming().username)).data.userId == userId
+              )
+              || (
+                isOwner(userId)
+                && (!('account_type' in existing()) || existing().account_type == null || existing().account_type == '')
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'account_type',
+                  'updatedAt'
+                ])
+                && incoming().account_type == 'freelancer'
+              )
             )
           )
         );
