@@ -8,8 +8,11 @@ import {
 } from "firebase/firestore";
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { db, handleFirestoreError, OperationType, storage } from "./firebase";
+import { parseGoogleDriveVideoUrl, sanitizeExternalHttpUrl } from "./media";
 import type {
   DakhlProfile,
+  ExperienceLevel,
+  PortfolioProject,
   TopupRequestRecord,
   WalletRecord,
   WalletSettingsRecord,
@@ -291,8 +294,9 @@ export async function approveTopupRequest(params: {
       }
 
       if (profileSnap.exists()) {
+        const isClientProfile = profileSnap.data().account_type === "client";
         transaction.update(profileRef, {
-          has_balance: nextHasBalance,
+          has_balance: isClientProfile ? false : nextHasBalance,
           updatedAt: serverTimestamp(),
         });
       }
@@ -406,8 +410,9 @@ export async function manualCreditWallet(params: {
       }
 
       if (profileSnap.exists()) {
+        const isClientProfile = profileSnap.data().account_type === "client";
         transaction.update(profileRef, {
-          has_balance: nextHasBalance,
+          has_balance: isClientProfile ? false : nextHasBalance,
           updatedAt: serverTimestamp(),
         });
       }
@@ -429,27 +434,155 @@ export async function manualCreditWallet(params: {
   }
 }
 
-export async function syncProfileBalanceVisibility(userId: string, hasBalance: boolean): Promise<void> {
+export async function syncProfileBalanceVisibility(
+  userId: string,
+  hasBalance: boolean,
+  backfillFreelancerType = false,
+): Promise<void> {
   const profileRef = doc(db, "profiles", userId);
+  const payload: Record<string, unknown> = {
+    has_balance: hasBalance,
+    updatedAt: serverTimestamp(),
+  };
+  if (backfillFreelancerType) {
+    payload.account_type = "freelancer";
+  }
   try {
-    await updateDoc(profileRef, {
-      has_balance: hasBalance,
-      updatedAt: serverTimestamp(),
-    });
+    await updateDoc(profileRef, payload);
   } catch (error: unknown) {
     handleFirestoreError(error, OperationType.UPDATE, `profiles/${userId}`);
   }
 }
 
+export function mapProjectsArray(raw: unknown): PortfolioProject[] {
+  if (!Array.isArray(raw)) return [];
+  const items: PortfolioProject[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const obj = entry as Record<string, unknown>;
+    const id = typeof obj.id === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(obj.id) ? obj.id : "";
+    const title = typeof obj.title === "string" ? obj.title.trim().slice(0, 80) : "";
+    if (!id || title.length < 2) continue;
+
+    const description =
+      typeof obj.description === "string" && obj.description.trim()
+        ? obj.description.trim().slice(0, 300)
+        : null;
+    const imageUrl =
+      typeof obj.image_url === "string" &&
+      obj.image_url.length <= 180000 &&
+      /^data:image\/webp;base64,[A-Za-z0-9+/=]+$/.test(obj.image_url)
+        ? obj.image_url
+        : null;
+    const videoDriveUrl =
+      typeof obj.video_drive_url === "string"
+        ? parseGoogleDriveVideoUrl(obj.video_drive_url)
+        : null;
+
+    if (!imageUrl && !videoDriveUrl) continue;
+    const normalizedImage = imageUrl;
+    const normalizedVideo = normalizedImage ? null : videoDriveUrl;
+    items.push({
+      id,
+      title,
+      description,
+      image_url: normalizedImage,
+      video_drive_url: normalizedVideo,
+    });
+    if (items.length >= 3) break;
+  }
+  return items;
+}
+
+export async function updateUserProfile(params: {
+  userId: string;
+  display_name: string;
+  avatar_url: string | null;
+  cover_url?: string | null;
+  governorate: string | null;
+  city: string | null;
+  bio: string | null;
+  portfolio_url: string | null;
+  projects: PortfolioProject[];
+  experience_level: ExperienceLevel;
+  skills: string[];
+  interests: string[];
+}): Promise<void> {
+  const cleanName = params.display_name.trim().slice(0, 80);
+  if (cleanName.length < 2) {
+    throw new Error("INVALID_DISPLAY_NAME");
+  }
+
+  const cleanSkills = params.skills
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 1 && s.length <= 60)
+    .slice(0, 20);
+  const cleanInterests = params.interests
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 1 && s.length <= 60)
+    .slice(0, 20);
+  if (cleanInterests.length < 1) {
+    throw new Error("INVALID_INTERESTS");
+  }
+
+  const cleanPortfolioUrl = params.portfolio_url
+    ? sanitizeExternalHttpUrl(params.portfolio_url)
+    : null;
+  if (params.portfolio_url && params.portfolio_url.trim() && !cleanPortfolioUrl) {
+    throw new Error("INVALID_PORTFOLIO_URL");
+  }
+
+  const cleanProjects = mapProjectsArray(params.projects).slice(0, 3);
+  const cleanAvatar =
+    params.avatar_url && params.avatar_url.length <= 50000 ? params.avatar_url : null;
+  const cleanCover =
+    typeof params.cover_url === "string" &&
+    params.cover_url.length <= 165000 &&
+    /^data:image\/webp;base64,[A-Za-z0-9+/=]+$/.test(params.cover_url)
+      ? params.cover_url
+      : null;
+
+  const path = `profiles/${params.userId}`;
+  try {
+    await updateDoc(doc(db, "profiles", params.userId), {
+      display_name: cleanName,
+      avatar_url: cleanAvatar,
+      cover_url: cleanCover,
+      governorate: params.governorate?.trim().slice(0, 80) || null,
+      city: params.city?.trim().slice(0, 80) || null,
+      bio: params.bio?.trim().slice(0, 500) || null,
+      portfolio_url: cleanPortfolioUrl,
+      projects: cleanProjects,
+      experience_level: params.experience_level,
+      skills: cleanSkills,
+      interests: cleanInterests,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error: unknown) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
 export function mapProfileDoc(id: string, data: Record<string, unknown>): DakhlProfile {
+  const rawPortfolio =
+    typeof data.portfolio_url === "string" ? sanitizeExternalHttpUrl(data.portfolio_url) : null;
+  const rawCover =
+    typeof data.cover_url === "string" &&
+    data.cover_url.length <= 165000 &&
+    /^data:image\/webp;base64,[A-Za-z0-9+/=]+$/.test(data.cover_url)
+      ? data.cover_url
+      : null;
   return {
     id: typeof data.id === "string" ? data.id : id,
     username: typeof data.username === "string" ? data.username : "",
     display_name: typeof data.display_name === "string" ? data.display_name : "",
     avatar_url: typeof data.avatar_url === "string" ? data.avatar_url : null,
+    cover_url: rawCover,
     governorate: typeof data.governorate === "string" ? data.governorate : null,
     city: typeof data.city === "string" ? data.city : null,
     bio: typeof data.bio === "string" ? data.bio : null,
+    portfolio_url: rawPortfolio,
+    projects: mapProjectsArray(data.projects),
     experience_level: (data.experience_level as DakhlProfile["experience_level"]) ?? null,
     profile_completed: Boolean(data.profile_completed),
     skills: Array.isArray(data.skills) ? data.skills.filter((s): s is string => typeof s === "string") : [],
@@ -457,6 +590,7 @@ export function mapProfileDoc(id: string, data: Record<string, unknown>): DakhlP
       ? data.interests.filter((s): s is string => typeof s === "string")
       : [],
     has_balance: Boolean(data.has_balance),
+    account_type: data.account_type === "client" ? "client" : "freelancer",
   };
 }
 

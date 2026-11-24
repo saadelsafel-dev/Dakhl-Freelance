@@ -27,8 +27,13 @@
         },
         "avatar_url": {
           "type": "string",
-          "description": "Optional public avatar URL or compact compressed JPEG data URL.",
+          "description": "Optional public avatar URL or compact compressed WebP data URL.",
           "maxLength": 50000
+        },
+        "cover_url": {
+          "type": "string",
+          "description": "Optional compressed WebP cover photo data URL.",
+          "maxLength": 165000
         },
         "governorate": {
           "type": "string",
@@ -43,7 +48,7 @@
         "bio": {
           "type": "string",
           "description": "Short biography.",
-          "maxLength": 300
+          "maxLength": 500
         },
         "experience_level": {
           "type": "string",
@@ -65,6 +70,20 @@
         "has_balance": {
           "type": "boolean",
           "description": "Admin-controlled visibility flag indicating the user has wallet balance or transaction credits."
+        },
+        "account_type": {
+          "type": "string",
+          "description": "Account role chosen during signup ('freelancer' or 'client'); legacy profiles without this field default to 'freelancer'.",
+          "enum": ["freelancer", "client"]
+        },
+        "portfolio_url": {
+          "type": "string",
+          "description": "Optional external HTTP/HTTPS portfolio link.",
+          "maxLength": 300
+        },
+        "projects": {
+          "type": "array",
+          "description": "Up to 3 showcase projects, each with either a WebP image data URL or a Google Drive video preview link."
         },
         "createdAt": {
           "type": "string",

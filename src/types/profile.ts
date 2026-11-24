@@ -1,18 +1,31 @@
 export type ExperienceLevel = "beginner" | "intermediate" | "professional" | "no_experience";
+export type AccountType = "freelancer" | "client";
+
+export interface PortfolioProject {
+  id: string;
+  title: string;
+  description: string | null;
+  image_url: string | null;
+  video_drive_url: string | null;
+}
 
 export interface DakhlProfile {
   id: string;
   username: string;
   display_name: string;
   avatar_url: string | null;
+  cover_url?: string | null;
   governorate: string | null;
   city: string | null;
   bio: string | null;
+  portfolio_url?: string | null;
+  projects?: PortfolioProject[];
   experience_level: ExperienceLevel | null;
   profile_completed: boolean;
   skills: string[];
   interests: string[];
   has_balance?: boolean;
+  account_type?: AccountType;
 }
 
 export interface AuthMeta {

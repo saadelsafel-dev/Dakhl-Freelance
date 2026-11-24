@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import {
   onAuthStateChanged,
   sendEmailVerification,
@@ -6,8 +6,7 @@ import {
   signOut as firebaseSignOut,
   type User,
 } from "firebase/auth";
-import { doc, getDoc, onSnapshot, runTransaction, serverTimestamp } from "firebase/firestore";
-import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
+import { doc, getDoc, onSnapshot, runTransaction, serverTimestamp, updateDoc } from "firebase/firestore";
 import {
   ArrowLeft,
   ArrowRight,
@@ -24,16 +23,16 @@ import {
   googleProvider,
   handleFirestoreError,
   OperationType,
-  storage,
 } from "../../lib/firebase";
-import { isSuperUserAccount } from "../../lib/wallet";
-import type { AuthMeta, DakhlProfile, ExperienceLevel } from "../../types/profile";
+import { AVATAR_WEBP_MAX_LENGTH, convertImageToWebpDataUrl } from "../../lib/media";
+import { isSuperUserAccount, mapProfileDoc } from "../../lib/wallet";
+import type { AccountType, AuthMeta, DakhlProfile, ExperienceLevel } from "../../types/profile";
 
 const USERNAME_PATTERN = /^[a-z0-9_]{3,24}$/;
 const DISPLAY_NAME_MIN = 2;
 const DISPLAY_NAME_MAX = 80;
 const LOCATION_MAX = 80;
-const BIO_MAX = 300;
+const BIO_MAX = 500;
 const SKILL_MAX_COUNT = 20;
 const SKILL_MAX_LENGTH = 60;
 const INTEREST_MIN_COUNT = 1;
@@ -75,6 +74,19 @@ const experienceOptions: { value: ExperienceLevel; label: string; description: s
   { value: "no_experience", label: "لا أملك خبرة بعد", description: "اختيار طبيعي ومناسب تمامًا" },
 ];
 
+const accountTypeOptions: { value: AccountType; label: string; description: string }[] = [
+  {
+    value: "freelancer",
+    label: "مستقل (فريلانسر)",
+    description: "أقدّم مهاراتي وخدماتي — يتطلب شحن المحفظة لفتح الحساب والظهور في «تعيين».",
+  },
+  {
+    value: "client",
+    label: "صاحب مشروع (عميل)",
+    description: "أبحث عن مستقلين للتعاون معهم — الحساب مفتوح مباشرة ولا يظهر في «تعيين».",
+  },
+];
+
 interface AuthFlowProps {
   children: (profile: DakhlProfile, onSignOut: () => Promise<void>, authMeta: AuthMeta) => ReactNode;
 }
@@ -93,6 +105,7 @@ export default function AuthFlow({ children }: AuthFlowProps) {
   const [profileRefresh, setProfileRefresh] = useState(0);
   const [, setAuthTick] = useState(0);
   const [fatalError, setFatalError] = useState<Error | null>(null);
+  const backfilledAccountTypeRef = useRef<string | null>(null);
 
   if (fatalError) {
     throw fatalError;
@@ -133,24 +146,21 @@ export default function AuthFlow({ children }: AuthFlowProps) {
       (snapshot) => {
         if (snapshot.exists()) {
           const data = snapshot.data();
-          setProfile({
-            id: typeof data.id === "string" ? data.id : snapshot.id,
-            username: typeof data.username === "string" ? data.username : "",
-            display_name: typeof data.display_name === "string" ? data.display_name : "",
-            avatar_url: typeof data.avatar_url === "string" ? data.avatar_url : null,
-            governorate: typeof data.governorate === "string" ? data.governorate : null,
-            city: typeof data.city === "string" ? data.city : null,
-            bio: typeof data.bio === "string" ? data.bio : null,
-            experience_level: (data.experience_level as ExperienceLevel | null) ?? null,
-            profile_completed: Boolean(data.profile_completed),
-            skills: Array.isArray(data.skills)
-              ? data.skills.filter((item): item is string => typeof item === "string")
-              : [],
-            interests: Array.isArray(data.interests)
-              ? data.interests.filter((item): item is string => typeof item === "string")
-              : [],
-            has_balance: Boolean(data.has_balance),
-          });
+
+          if (
+            typeof data.account_type !== "string" &&
+            data.profile_completed &&
+            user.emailVerified &&
+            backfilledAccountTypeRef.current !== user.uid
+          ) {
+            backfilledAccountTypeRef.current = user.uid;
+            void updateDoc(doc(db, "profiles", user.uid), {
+              account_type: "freelancer",
+              updatedAt: serverTimestamp(),
+            }).catch(() => {});
+          }
+
+          setProfile(mapProfileDoc(snapshot.id, data));
         } else {
           setProfile(null);
         }
@@ -329,6 +339,9 @@ function Onboarding({
   onSignOut: () => Promise<void>;
 }) {
   const [step, setStep] = useState(0);
+  const [accountType, setAccountType] = useState<AccountType | "">(
+    initialProfile?.account_type ?? "",
+  );
   const [username, setUsername] = useState(
     initialProfile?.username ?? `user_${user.uid.slice(0, 8).toLowerCase().replace(/[^a-z0-9_]/g, "")}`,
   );
@@ -388,6 +401,10 @@ function Onboarding({
     event.preventDefault();
     setError("");
     if (step === 0) {
+      if (!accountType) {
+        setError("اختر نوع الحساب (مستقل أم صاحب مشروع) للمتابعة.");
+        return;
+      }
       const cleanUsername = username.trim().toLowerCase();
       if (!USERNAME_PATTERN.test(cleanUsername)) {
         setError("اسم المستخدم يجب أن يتكون من ٣ إلى ٢٤ حرفًا إنجليزيًا صغيرًا أو رقمًا أو _.");
@@ -443,6 +460,12 @@ function Onboarding({
       .filter((item) => item.length >= 1 && item.length <= SKILL_MAX_LENGTH)
       .slice(0, INTEREST_MAX_COUNT);
 
+    if (!accountType) {
+      setStep(0);
+      setError("اختر نوع الحساب (مستقل أم صاحب مشروع).");
+      setSaving(false);
+      return;
+    }
     if (!USERNAME_PATTERN.test(cleanUsername)) {
       setError("اسم المستخدم يجب أن يتكون من ٣ إلى ٢٤ حرفًا إنجليزيًا صغيرًا أو رقمًا أو _.");
       setSaving(false);
@@ -465,7 +488,7 @@ function Onboarding({
 
       if (avatarFile) {
         try {
-          finalAvatarUrl = await uploadAvatarImage(avatarFile, user.uid);
+          finalAvatarUrl = await uploadAvatarImage(avatarFile);
         } catch (uploadError: unknown) {
           console.error("Avatar upload failed:", uploadError);
           setError("تعذر معالجة الصورة الشخصية. يمكنك المتابعة بدون صورة أو اختيار صورة أخرى.");
@@ -518,11 +541,12 @@ function Onboarding({
               skills: cleanSkills,
               interests: cleanInterests,
               has_balance: false,
+              account_type: accountType,
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
             });
           } else {
-            transaction.update(profileRef, {
+            const updatePayload: Record<string, unknown> = {
               username: cleanUsername,
               display_name: cleanDisplayName,
               avatar_url: finalAvatarUrl,
@@ -534,7 +558,11 @@ function Onboarding({
               skills: cleanSkills,
               interests: cleanInterests,
               updatedAt: serverTimestamp(),
-            });
+            };
+            if (!profileSnap.data().account_type) {
+              updatePayload.account_type = accountType;
+            }
+            transaction.update(profileRef, updatePayload);
           }
         });
       } catch (txError: unknown) {
@@ -607,7 +635,32 @@ function Onboarding({
             <div className="setup-step">
               <span className="auth-kicker">خطوة ١ من ٣</span>
               <h1>خلّينا نتعرّف عليك</h1>
-              <p>أضف بيانات بسيطة تساعد الآخرين على معرفة من أنت.</p>
+              <p>حدّد نوع حسابك وأضف بيانات بسيطة تساعدنا على تجهيز تجربتك.</p>
+              <fieldset className="experience-options" style={{ marginBottom: 18 }}>
+                <legend>نوع الحساب</legend>
+                {accountTypeOptions.map((option) => (
+                  <label
+                    className={`experience-option ${accountType === option.value ? "selected" : ""}`}
+                    key={option.value}
+                  >
+                    <input
+                      type="radio"
+                      name="account_type"
+                      value={option.value}
+                      checked={accountType === option.value}
+                      onChange={() => {
+                        setAccountType(option.value);
+                        setError("");
+                      }}
+                    />
+                    <span>
+                      <strong>{option.label}</strong>
+                      <small>{option.description}</small>
+                    </span>
+                    <i>{accountType === option.value && <Check size={13} />}</i>
+                  </label>
+                ))}
+              </fieldset>
               <label className="avatar-upload">
                 <input type="file" accept="image/png,image/jpeg,image/webp" onChange={chooseAvatar} />
                 <span className="avatar-preview">
@@ -682,8 +735,16 @@ function Onboarding({
           {step === 1 && (
             <div className="setup-step">
               <span className="auth-kicker">خطوة ٢ من ٣</span>
-              <h1>ما المهارات التي تتقنها؟</h1>
-              <p>اختر من القائمة أو أضف مهارة أخرى. يمكنك تعديلها لاحقًا.</p>
+              <h1>
+                {accountType === "client"
+                  ? "ما التخصصات التي تهم مشاريعك؟"
+                  : "ما المهارات التي تتقنها؟"}
+              </h1>
+              <p>
+                {accountType === "client"
+                  ? "اختر التخصصات التي تبحث عنها عند تعيين المستقلين، أو أضف تخصصًا آخر (اختياري)."
+                  : "اختر من القائمة أو أضف مهارة أخرى. يمكنك تعديلها لاحقًا."}
+              </p>
               <div className="selection-grid">
                 {suggestedSkills.map((skill) => (
                   <button
@@ -738,7 +799,9 @@ function Onboarding({
               <h1>اختر ما يناسبك</h1>
               <p>كل البدايات مرحّب بها، والاختيار قابل للتعديل لاحقًا.</p>
               <fieldset className="experience-options">
-                <legend>مستوى الخبرة</legend>
+                <legend>
+                  {accountType === "client" ? "خبرتك في إدارة المشاريع" : "مستوى الخبرة"}
+                </legend>
                 {experienceOptions.map((option) => (
                   <label
                     className={`experience-option ${experience === option.value ? "selected" : ""}`}
@@ -760,7 +823,9 @@ function Onboarding({
                 ))}
               </fieldset>
               <fieldset className="interest-options">
-                <legend>أنواع الفرص التي تهمك</legend>
+                <legend>
+                  {accountType === "client" ? "أنواع المشاريع التي تبحث عنها" : "أنواع الفرص التي تهمك"}
+                </legend>
                 <div className="selection-grid">
                   {interestOptions.map((interest) => (
                     <button
@@ -930,69 +995,11 @@ function VerifyEmailPage({
   );
 }
 
-async function uploadAvatarImage(file: File, userId: string): Promise<string> {
-  const imageUrl = URL.createObjectURL(file);
-  try {
-    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const element = new Image();
-      element.onload = () => resolve(element);
-      element.onerror = () => reject(new Error("INVALID_IMAGE"));
-      element.src = imageUrl;
-    });
-
-    const maxSide = 220;
-    const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
-    const width = Math.max(1, Math.round(img.width * scale));
-    const height = Math.max(1, Math.round(img.height * scale));
-
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("CANVAS_UNAVAILABLE");
-    ctx.drawImage(img, 0, 0, width, height);
-
-    let quality = 0.72;
-    let dataUrl = canvas.toDataURL("image/jpeg", quality);
-    while (dataUrl.length > 45000 && quality > 0.3) {
-      quality -= 0.12;
-      dataUrl = canvas.toDataURL("image/jpeg", quality);
-    }
-
-    const blob = await new Promise<Blob>((resolve, reject) => {
-      canvas.toBlob(
-        (result) => {
-          if (result) resolve(result);
-          else reject(new Error("BLOB_FAILED"));
-        },
-        "image/jpeg",
-        0.72,
-      );
-    });
-
-    try {
-      const storageRef = ref(storage, `avatars/${userId}/${crypto.randomUUID()}.jpg`);
-      const uploadPromise = uploadBytes(storageRef, blob, { contentType: "image/jpeg" }).then(() =>
-        getDownloadURL(storageRef),
-      );
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        window.setTimeout(() => reject(new Error("STORAGE_TIMEOUT")), 5000),
-      );
-      const url = await Promise.race([uploadPromise, timeoutPromise]);
-      if (url && url.length <= AVATAR_URL_MAX) {
-        return url;
-      }
-    } catch {
-      // Fallback to compact JPEG data URL when Storage bucket is unavailable on Spark tier
-    }
-
-    if (dataUrl.length > AVATAR_URL_MAX) {
-      throw new Error("AVATAR_TOO_LARGE");
-    }
-    return dataUrl;
-  } finally {
-    URL.revokeObjectURL(imageUrl);
-  }
+async function uploadAvatarImage(file: File): Promise<string> {
+  return convertImageToWebpDataUrl(file, {
+    maxSide: 220,
+    maxLength: AVATAR_WEBP_MAX_LENGTH,
+  });
 }
 
 function GoogleMark() {

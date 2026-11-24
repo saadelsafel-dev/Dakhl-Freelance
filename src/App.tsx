@@ -6,28 +6,44 @@ import {
   ArrowLeft,
   ArrowUpLeft,
   BriefcaseBusiness,
+  Camera,
   Check,
   CircleHelp,
   Compass,
+  ExternalLink,
   Eye,
   FileText,
+  FolderKanban,
   Heart,
   House,
   ImagePlus,
+  Link2,
   LoaderCircle,
   Lock,
   LogOut,
   MapPin,
   MessageCircle,
+  Pencil,
   Plus,
   Search,
   Send,
   ShieldCheck,
+  Trash2,
   Users,
+  Video,
   Wallet,
   X,
 } from "lucide-react";
 import { db, handleFirestoreError, OperationType } from "./lib/firebase";
+import {
+  AVATAR_WEBP_MAX_LENGTH,
+  convertImageToWebpDataUrl,
+  COVER_WEBP_MAX_LENGTH,
+  extractTextSegmentsWithLinks,
+  parseGoogleDriveVideoUrl,
+  PROJECT_IMAGE_MAX_LENGTH,
+  sanitizeExternalHttpUrl,
+} from "./lib/media";
 import {
   approveTopupRequest,
   formatArabicDate,
@@ -41,10 +57,13 @@ import {
   submitTopupRequest,
   syncProfileBalanceVisibility,
   timestampToMillis,
+  updateUserProfile,
 } from "./lib/wallet";
 import type {
   AuthMeta,
   DakhlProfile,
+  ExperienceLevel,
+  PortfolioProject,
   TopupRequestRecord,
   TopupStatus,
   WalletRecord,
@@ -141,9 +160,13 @@ function App({
   const [adminWallets, setAdminWallets] = useState<Record<string, WalletRecord>>({});
   const [adminWalletsReady, setAdminWalletsReady] = useState(false);
   const [adminProfiles, setAdminProfiles] = useState<DakhlProfile[]>([]);
+  const [missingAccountTypeIds, setMissingAccountTypeIds] = useState<Record<string, boolean>>({});
   const [fundedProfiles, setFundedProfiles] = useState<DakhlProfile[]>([]);
   const syncedBalanceFlagsRef = useRef<Record<string, boolean>>({});
+  const syncedAccountTypeRef = useRef<Record<string, boolean>>({});
   const [receiptPreviewUrl, setReceiptPreviewUrl] = useState<string | null>(null);
+  const [lightboxImage, setLightboxImage] = useState<{ url: string; title: string } | null>(null);
+  const [previewProfile, setPreviewProfile] = useState<DakhlProfile | null>(null);
   const [manualCreditTarget, setManualCreditTarget] = useState<DakhlProfile | null>(null);
   const [fatalError, setFatalError] = useState<Error | null>(null);
 
@@ -152,7 +175,9 @@ function App({
   }
 
   const isSuperUser = authMeta.isSuperUser;
-  const isLocked = !isSuperUser && (!wallet.is_unlocked || wallet.remaining_transactions <= 0);
+  const isClient = !isSuperUser && profile.account_type === "client";
+  const isLocked =
+    !isSuperUser && !isClient && (!wallet.is_unlocked || wallet.remaining_transactions <= 0);
 
   const navItems = useMemo(() => {
     if (isSuperUser) {
@@ -280,7 +305,15 @@ function App({
     const unsubAllProfiles = onSnapshot(
       collection(db, "profiles"),
       (snapshot) => {
-        const list: DakhlProfile[] = snapshot.docs.map((d) => mapProfileDoc(d.id, d.data()));
+        const missingMap: Record<string, boolean> = {};
+        const list: DakhlProfile[] = snapshot.docs.map((d) => {
+          const data = d.data();
+          if (typeof data.account_type !== "string") {
+            missingMap[d.id] = true;
+          }
+          return mapProfileDoc(d.id, data);
+        });
+        setMissingAccountTypeIds(missingMap);
         setAdminProfiles(list);
       },
       (error) => {
@@ -304,18 +337,35 @@ function App({
 
     for (const userProfile of adminProfiles) {
       const userWallet = adminWallets[userProfile.id];
-      const expectedHasBalance =
-        (userWallet?.balance_egp ?? 0) > 0 || (userWallet?.remaining_transactions ?? 0) > 0;
+      const isClientProfile = userProfile.account_type === "client";
+      const expectedHasBalance = isClientProfile
+        ? false
+        : (userWallet?.balance_egp ?? 0) > 0 || (userWallet?.remaining_transactions ?? 0) > 0;
       const currentFlag = Boolean(userProfile.has_balance);
+      const needsBalanceSync =
+        currentFlag !== expectedHasBalance &&
+        syncedBalanceFlagsRef.current[userProfile.id] !== expectedHasBalance;
+      const needsTypeBackfill =
+        Boolean(missingAccountTypeIds[userProfile.id]) &&
+        !syncedAccountTypeRef.current[userProfile.id];
 
-      if (currentFlag !== expectedHasBalance && syncedBalanceFlagsRef.current[userProfile.id] !== expectedHasBalance) {
-        syncedBalanceFlagsRef.current[userProfile.id] = expectedHasBalance;
-        void syncProfileBalanceVisibility(userProfile.id, expectedHasBalance).catch((error: unknown) => {
+      if (needsBalanceSync || needsTypeBackfill) {
+        if (needsBalanceSync) {
+          syncedBalanceFlagsRef.current[userProfile.id] = expectedHasBalance;
+        }
+        if (needsTypeBackfill) {
+          syncedAccountTypeRef.current[userProfile.id] = true;
+        }
+        void syncProfileBalanceVisibility(
+          userProfile.id,
+          expectedHasBalance,
+          needsTypeBackfill,
+        ).catch((error: unknown) => {
           if (error instanceof Error) setFatalError(error);
         });
       }
     }
-  }, [isSuperUser, adminWalletsReady, adminProfiles, adminWallets]);
+  }, [isSuperUser, adminWalletsReady, adminProfiles, adminWallets, missingAccountTypeIds]);
 
   useEffect(() => {
     if (isSuperUser || isLocked) {
@@ -327,7 +377,9 @@ function App({
     const unsubFunded = onSnapshot(
       fundedQuery,
       (snapshot) => {
-        const list = snapshot.docs.map((d) => mapProfileDoc(d.id, d.data()));
+        const list = snapshot.docs
+          .map((d) => mapProfileDoc(d.id, d.data()))
+          .filter((member) => member.account_type !== "client");
         setFundedProfiles(list);
       },
       (error) => {
@@ -459,8 +511,10 @@ function App({
               <span>
                 {isSuperUser
                   ? "الإدارة · Superuser"
-                  : [profile.city, profile.governorate].filter(Boolean).join("، ") ||
-                    experienceLabel(profile.experience_level)}
+                  : isClient
+                    ? "صاحب مشروع (عميل)"
+                    : [profile.city, profile.governorate].filter(Boolean).join("، ") ||
+                      `مستقل · ${experienceLabel(profile.experience_level)}`}
               </span>
             </div>
           </div>
@@ -522,11 +576,12 @@ function App({
             </div>
           )}
 
-          {!walletReady && !isSuperUser ? (
+          {!walletReady && !isSuperUser && !isClient ? (
             <div className="empty-state">جارٍ التحقق من حالة المحفظة...</div>
           ) : isLocked ? (
             <WalletContent
               isLocked
+              isClient={false}
               wallet={wallet}
               unitPriceEgp={unitPriceEgp}
               minTransactions={minTransactions}
@@ -588,12 +643,14 @@ function App({
                   saved={saved}
                   setSaved={setSaved}
                   onConnect={(member) => openConnection(profileToPerson(member))}
+                  onPreviewProfile={setPreviewProfile}
                   onOpenManualCredit={setManualCreditTarget}
                 />
               )}
               {effectiveSection === "wallet" && (
                 <WalletContent
                   isLocked={false}
+                  isClient={isClient}
                   wallet={wallet}
                   unitPriceEgp={unitPriceEgp}
                   minTransactions={minTransactions}
@@ -603,7 +660,14 @@ function App({
                   onPreviewReceipt={setReceiptPreviewUrl}
                 />
               )}
-              {effectiveSection === "profile" && <ProfileContent profile={profile} />}
+              {effectiveSection === "profile" && (
+                <ProfileContent
+                  profile={profile}
+                  onPreviewImage={(url, title) => setLightboxImage({ url, title })}
+                  onNotify={showToast}
+                  onFatalError={setFatalError}
+                />
+              )}
               {effectiveSection === "admin" && isSuperUser && (
                 <AdminContent
                   adminUid={profile.id}
@@ -625,7 +689,9 @@ function App({
         <aside className="left-sidebar">
           <div className="balance-card">
             <div className="balance-card-top">
-              <span>{isSuperUser ? "حساب الإدارة" : "رصيد المحفظة"}</span>
+              <span>
+                {isSuperUser ? "حساب الإدارة" : isClient ? "حساب عميل" : "رصيد المحفظة"}
+              </span>
               <span className="wallet-icon">
                 <Wallet size={17} />
               </span>
@@ -635,21 +701,42 @@ function App({
                 <>
                   مفعل <small>Superuser</small>
                 </>
+              ) : isClient ? (
+                <>
+                  مفتوح <small>صاحب مشروع</small>
+                </>
               ) : (
                 <>
                   {formatArabicNumber(wallet.balance_egp)} <small>ج.م</small>
                 </>
               )}
             </strong>
-            {!isSuperUser && (
+            {!isSuperUser && !isClient && (
               <div style={{ fontSize: 11, color: "#c7d7cd", marginTop: 4 }}>
                 المعاملات المتاحة: {formatArabicNumber(wallet.remaining_transactions)}
               </div>
             )}
-            <button onClick={() => (isSuperUser ? navigateTo("admin") : setDialog("topup"))}>
+            {isClient && (
+              <div style={{ fontSize: 11, color: "#58715b", marginTop: 4 }}>
+                حسابك مفتوح ولا يظهر في «تعيين»
+              </div>
+            )}
+            <button
+              onClick={() =>
+                isSuperUser
+                  ? navigateTo("admin")
+                  : isClient
+                    ? navigateTo("assign")
+                    : setDialog("topup")
+              }
+            >
               {isSuperUser ? (
                 <>
                   إدارة الطلبات ({formatArabicNumber(pendingAdminCount)})
+                </>
+              ) : isClient ? (
+                <>
+                  تصفح المستقلين <ArrowLeft size={15} />
                 </>
               ) : (
                 <>
@@ -783,6 +870,54 @@ function App({
             </div>
           </section>
         </div>
+      )}
+
+      {lightboxImage && (
+        <div
+          className="dialog-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setLightboxImage(null);
+          }}
+        >
+          <section className="dialog-card" role="dialog" aria-modal="true" style={{ maxWidth: 640 }}>
+            <button
+              className="dialog-close"
+              onClick={() => setLightboxImage(null)}
+              aria-label="إغلاق"
+            >
+              <X size={19} />
+            </button>
+            <h2 style={{ marginTop: 4 }}>{lightboxImage.title}</h2>
+            <div
+              style={{
+                marginTop: 12,
+                borderRadius: 10,
+                overflow: "hidden",
+                border: "1px solid var(--line)",
+                background: "#f7f8f6",
+              }}
+            >
+              <img
+                src={lightboxImage.url}
+                alt={lightboxImage.title}
+                style={{ display: "block", width: "100%", maxHeight: "70vh", objectFit: "contain" }}
+              />
+            </div>
+          </section>
+        </div>
+      )}
+
+      {previewProfile && (
+        <ProfilePreviewDialog
+          member={previewProfile}
+          isSuperUser={isSuperUser}
+          onClose={() => setPreviewProfile(null)}
+          onConnect={(member) => {
+            setPreviewProfile(null);
+            openConnection(profileToPerson(member));
+          }}
+          onPreviewImage={(url, title) => setLightboxImage({ url, title })}
+        />
       )}
 
       {toast && (
@@ -1060,6 +1195,7 @@ function AssignContent({
   saved,
   setSaved,
   onConnect,
+  onPreviewProfile,
   onOpenManualCredit,
 }: {
   isSuperUser: boolean;
@@ -1070,6 +1206,7 @@ function AssignContent({
   saved: string[];
   setSaved: (value: string[] | ((current: string[]) => string[])) => void;
   onConnect: (member: DakhlProfile) => void;
+  onPreviewProfile: (member: DakhlProfile) => void;
   onOpenManualCredit: (target: DakhlProfile) => void;
 }) {
   const [balanceFilter, setBalanceFilter] = useState<"all" | "zero" | "funded">("all");
@@ -1078,6 +1215,7 @@ function AssignContent({
   const visibleMembers = useMemo(() => {
     const queryText = search.trim().toLowerCase();
     return profiles.filter((member) => {
+      if (member.account_type === "client") return false;
       const userWallet = wallets[member.id];
       const hasBalance = isSuperUser
         ? (userWallet?.balance_egp ?? 0) > 0 || (userWallet?.remaining_transactions ?? 0) > 0
@@ -1193,6 +1331,11 @@ function AssignContent({
               <div className="person-location">
                 <MapPin size={14} />
                 {locationText}
+                {(member.projects?.length ?? 0) > 0 && (
+                  <span style={{ marginRight: "auto", color: "#24543c", fontWeight: 600 }}>
+                    {formatArabicNumber(member.projects?.length ?? 0)} مشاريع
+                  </span>
+                )}
               </div>
               <div className="skill-list">
                 {tags.slice(0, 4).map((skill) => (
@@ -1210,21 +1353,39 @@ function AssignContent({
                       }}
                     >
                       {hasBalance
-                        ? `الرصيد: ${formatArabicNumber(balanceEgp)} ج.م · ظاهر للجميع`
-                        : "رصيد ٠ · ظاهر للإدارة فقط"}
+                        ? `الرصيد: ${formatArabicNumber(balanceEgp)} ج.م`
+                        : "رصيد ٠ · للإدارة"}
                     </span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <button
+                        type="button"
+                        className="connect-button"
+                        onClick={() => onPreviewProfile(member)}
+                      >
+                        <Eye size={13} /> الملف
+                      </button>
+                      <button
+                        type="button"
+                        className="connect-button"
+                        onClick={() => onOpenManualCredit(member)}
+                      >
+                        <Plus size={13} /> إضافة رصيد
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
                     <button
                       type="button"
                       className="connect-button"
-                      onClick={() => onOpenManualCredit(member)}
+                      onClick={() => onPreviewProfile(member)}
                     >
-                      <Plus size={13} /> إضافة رصيد
+                      <Eye size={14} /> عرض الأعمال
+                    </button>
+                    <button className="connect-button" onClick={() => onConnect(member)}>
+                      تواصل <ArrowLeft size={14} />
                     </button>
                   </>
-                ) : (
-                  <button className="connect-button" onClick={() => onConnect(member)}>
-                    تواصل <ArrowLeft size={14} />
-                  </button>
                 )}
               </div>
             </article>
@@ -1235,8 +1396,8 @@ function AssignContent({
             {search.trim() || (isSuperUser ? balanceFilter !== "all" : skillFilter !== "الكل")
               ? "لا توجد نتائج مطابقة للبحث الحالي."
               : isSuperUser
-                ? "لا يوجد أعضاء مسجلون بعد."
-                : "لا يوجد أعضاء لديهم رصيد متاح للعرض حاليًا."}
+                ? "لا يوجد مستقلون مسجلون بعد."
+                : "لا يوجد مستقلون لديهم رصيد متاح للعرض حاليًا."}
           </div>
         )}
       </div>
@@ -1401,6 +1562,7 @@ function MessagesContent(props: {
 
 function WalletContent({
   isLocked,
+  isClient,
   wallet,
   unitPriceEgp,
   minTransactions,
@@ -1410,6 +1572,7 @@ function WalletContent({
   onPreviewReceipt,
 }: {
   isLocked: boolean;
+  isClient: boolean;
   wallet: WalletRecord;
   unitPriceEgp: number;
   minTransactions: number;
@@ -1425,7 +1588,11 @@ function WalletContent({
       <div className="wallet-summary">
         <div>
           <span>
-            {isLocked ? "الحساب مقفول — يتطلب شحن المحفظة" : "رصيدك المتاح"}
+            {isLocked
+              ? "الحساب مقفول — يتطلب شحن المحفظة"
+              : isClient
+                ? "محفظة العميل (الحساب مفتوح)"
+                : "رصيدك المتاح"}
           </span>
           <strong>
             {formatArabicNumber(wallet.balance_egp)} <small>جنيه مصري</small>
@@ -1433,7 +1600,9 @@ function WalletContent({
           <p>
             {isLocked ? <Lock size={15} /> : <ShieldCheck size={15} />}
             {" "}
-            المعاملات المتاحة: {formatArabicNumber(wallet.remaining_transactions)} معاملة
+            {isClient
+              ? "حساب عميل · التصفح والتواصل متاحان مباشرة"
+              : `المعاملات المتاحة: ${formatArabicNumber(wallet.remaining_transactions)} معاملة`}
           </p>
         </div>
         <button className="primary-button" onClick={onTopup}>
@@ -1449,14 +1618,18 @@ function WalletContent({
           <strong>
             {isLocked
               ? "كل الأقسام مقفولة حتى يتم شحن محفظتك من الإدارة"
-              : `أقل عدد معاملات للشحن هو ${formatArabicNumber(minTransactions)} معاملات (${formatArabicNumber(unitPriceEgp)} ج.م للمعاملة)`}
+              : isClient
+                ? "حساب صاحب مشروع (عميل) — جميع الأقسام مفتوحة لك"
+                : `أقل عدد معاملات للشحن هو ${formatArabicNumber(minTransactions)} معاملات (${formatArabicNumber(unitPriceEgp)} ج.م للمعاملة)`}
           </strong>
           <p>
             {isLocked
               ? hasPending
                 ? "طلبك قيد المراجعة الآن. بمجرد تأكيد التحويل وإضافة الرصيد يدويًا من الإدارة ستُفتح جميع أقسام المنصة تلقائيًا."
                 : `قدّم طلب شحن بعدد المحاولات المطلوبة (${formatArabicNumber(minTransactions)} معاملات على الأقل · ${formatArabicNumber(unitPriceEgp)} ج.م للمعاملة) وأرفق صورة التحويل، وستقوم الإدارة بمراجعة الطلب وإضافة الرصيد يدويًا لفتح الحساب.`
-              : "تتم مراجعة طلبات الشحن وصورة التحويل يدويًا وإضافة الرصيد إلى محفظتك."}
+              : isClient
+                ? "يمكنك تصفح المستقلين في «تعيين» واستخدام جميع أقسام المنصة بحرية، وملفك غير ظاهر للآخرين في قائمة «تعيين»."
+                : "تتم مراجعة طلبات الشحن وصورة التحويل يدويًا وإضافة الرصيد إلى محفظتك."}
           </p>
         </div>
       </div>
@@ -1892,25 +2065,29 @@ function AdminContent({
             const balance = userWallet?.balance_egp ?? 0;
             const remaining = userWallet?.remaining_transactions ?? 0;
             const unlocked = userWallet?.is_unlocked && remaining > 0;
+            const isClientUser = userProfile.account_type === "client";
             return (
               <div className="transaction-row" key={userProfile.id}>
                 <div className="transaction-copy">
                   <strong>
-                    {userProfile.display_name} (@{userProfile.username})
+                    {userProfile.display_name} (@{userProfile.username}) ·{" "}
+                    {isClientUser ? "عميل" : "مستقل"}
                   </strong>
                   <span>
-                    الحالة: {unlocked ? "مفعل" : "مقفول"} · الرصيد:{" "}
-                    {formatArabicNumber(balance)} ج.م · المعاملات المتاحة:{" "}
-                    {formatArabicNumber(remaining)}
+                    {isClientUser
+                      ? "حساب عميل (مفتوح مباشرة · مخفي من «تعيين»)"
+                      : `الحالة: ${unlocked ? "مفعل" : "مقفول"} · الرصيد: ${formatArabicNumber(balance)} ج.م · المعاملات المتاحة: ${formatArabicNumber(remaining)}`}
                   </span>
                 </div>
-                <button
-                  type="button"
-                  className="primary-button"
-                  onClick={() => onOpenManualCredit(userProfile)}
-                >
-                  <Plus size={14} /> إضافة رصيد
-                </button>
+                {!isClientUser && (
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={() => onOpenManualCredit(userProfile)}
+                  >
+                    <Plus size={14} /> إضافة رصيد
+                  </button>
+                )}
               </div>
             );
           })
@@ -2274,63 +2451,1463 @@ function ManualCreditDialog({
   );
 }
 
-function ProfileContent({ profile }: { profile: DakhlProfile }) {
+const profileSkillSuggestions = [
+  "تصميم جرافيك",
+  "تصميم UI/UX",
+  "كتابة المحتوى",
+  "التسويق الرقمي",
+  "إدارة وسائل التواصل",
+  "البرمجة",
+  "تطوير الويب",
+  "إدخال البيانات",
+  "الترجمة",
+  "التصوير",
+  "المونتاج",
+  "خدمة العملاء",
+];
+
+const profileInterestOptions = [
+  "تصميم",
+  "برمجة",
+  "تسويق",
+  "إدخال بيانات",
+  "كتابة ومحتوى",
+  "ترجمة",
+  "تصوير ومونتاج",
+  "خدمة عملاء",
+  "تعليم وتدريب",
+  "أعمال إدارية",
+];
+
+const profileExperienceOptions: { value: ExperienceLevel; label: string }[] = [
+  { value: "beginner", label: "مبتدئ" },
+  { value: "intermediate", label: "متوسط" },
+  { value: "professional", label: "محترف" },
+  { value: "no_experience", label: "لا أملك خبرة بعد" },
+];
+
+function BioTextWithLinks({ text }: { text: string }) {
+  const segments = extractTextSegmentsWithLinks(text);
+  return (
+    <p style={{ whiteSpace: "pre-line", overflowWrap: "anywhere" }}>
+      {segments.map((seg, index) =>
+        seg.type === "link" ? (
+          <a
+            key={`${seg.href}-${index}`}
+            href={seg.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "var(--green)", textDecoration: "underline", fontWeight: 500 }}
+          >
+            {seg.value}
+          </a>
+        ) : (
+          <span key={index}>{seg.value}</span>
+        ),
+      )}
+    </p>
+  );
+}
+
+function ProjectCard({
+  project,
+  onPreviewImage,
+  onDelete,
+}: {
+  project: PortfolioProject;
+  onPreviewImage: (url: string, title: string) => void;
+  onDelete?: () => void;
+}) {
+  return (
+    <article
+      style={{
+        border: "1px solid var(--line)",
+        borderRadius: 10,
+        background: "#fff",
+        overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      {project.image_url && (
+        <button
+          type="button"
+          onClick={() => onPreviewImage(project.image_url!, project.title)}
+          style={{
+            border: 0,
+            padding: 0,
+            background: "#f2f4f1",
+            width: "100%",
+            aspectRatio: "16 / 10",
+            overflow: "hidden",
+          }}
+          aria-label={`عرض صورة ${project.title}`}
+        >
+          <img
+            src={project.image_url}
+            alt={project.title}
+            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+          />
+        </button>
+      )}
+      {project.video_drive_url && (
+        <div
+          style={{
+            position: "relative",
+            width: "100%",
+            aspectRatio: "16 / 9",
+            background: "#111a16",
+            borderBottom: "1px solid var(--line)",
+          }}
+        >
+          <iframe
+            src={project.video_drive_url}
+            title={project.title}
+            allow="autoplay; fullscreen"
+            sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"
+            referrerPolicy="no-referrer"
+            style={{ width: "100%", height: "100%", border: 0, display: "block" }}
+          />
+        </div>
+      )}
+      <div style={{ padding: "12px 14px", display: "grid", gap: 6, flex: 1 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+          <strong style={{ fontSize: 13, color: "var(--ink)" }}>{project.title}</strong>
+          {onDelete && (
+            <button
+              type="button"
+              className="cancel-button"
+              onClick={onDelete}
+              style={{ padding: "4px 8px", fontSize: 10, color: "#8d5149" }}
+              aria-label={`حذف مشروع ${project.title}`}
+            >
+              <Trash2 size={13} />
+            </button>
+          )}
+        </div>
+        {project.description && (
+          <p style={{ margin: 0, fontSize: 11, color: "var(--muted)", lineHeight: 1.7 }}>
+            {project.description}
+          </p>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function ProfileContent({
+  profile,
+  onPreviewImage,
+  onNotify,
+  onFatalError,
+}: {
+  profile: DakhlProfile;
+  onPreviewImage: (url: string, title: string) => void;
+  onNotify: (message: string) => void;
+  onFatalError: (error: Error) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [addingProject, setAddingProject] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [editError, setEditError] = useState("");
+
+  const [displayName, setDisplayName] = useState(profile.display_name);
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(profile.avatar_url);
+  const [coverUrl, setCoverUrl] = useState<string | null>(profile.cover_url ?? null);
+  const [governorate, setGovernorate] = useState(profile.governorate ?? "");
+  const [city, setCity] = useState(profile.city ?? "");
+  const [bio, setBio] = useState(profile.bio ?? "");
+  const [portfolioUrl, setPortfolioUrl] = useState(profile.portfolio_url ?? "");
+  const [experienceLevel, setExperienceLevel] = useState<ExperienceLevel>(
+    profile.experience_level ?? "no_experience",
+  );
+  const [skills, setSkills] = useState<string[]>(profile.skills);
+  const [customSkill, setCustomSkill] = useState("");
+  const [interests, setInterests] = useState<string[]>(profile.interests);
+  const [projects, setProjects] = useState<PortfolioProject[]>(profile.projects ?? []);
+
+  const [projMediaType, setProjMediaType] = useState<"image" | "video">("image");
+  const [projTitle, setProjTitle] = useState("");
+  const [projDesc, setProjDesc] = useState("");
+  const [projImageUrl, setProjImageUrl] = useState<string | null>(null);
+  const [projVideoUrl, setProjVideoUrl] = useState("");
+  const [projError, setProjError] = useState("");
+  const [projBusy, setProjBusy] = useState(false);
+  const [mediaBusy, setMediaBusy] = useState<"avatar" | "cover" | null>(null);
+
+  useEffect(() => {
+    if (!editing && !addingProject) {
+      setDisplayName(profile.display_name);
+      setAvatarUrl(profile.avatar_url);
+      setCoverUrl(profile.cover_url ?? null);
+      setGovernorate(profile.governorate ?? "");
+      setCity(profile.city ?? "");
+      setBio(profile.bio ?? "");
+      setPortfolioUrl(profile.portfolio_url ?? "");
+      setExperienceLevel(profile.experience_level ?? "no_experience");
+      setSkills(profile.skills);
+      setInterests(profile.interests);
+      setProjects(profile.projects ?? []);
+    }
+  }, [profile, editing, addingProject]);
+
   const location = [profile.city, profile.governorate].filter(Boolean).join("، ");
+  const accountLabel =
+    profile.account_type === "client" ? "صاحب مشروع (عميل)" : "مستقل (فريلانسر)";
+  const savedProjects = profile.projects ?? [];
+  const activeCover = editing ? coverUrl : (profile.cover_url ?? null);
+  const activeAvatar = editing ? avatarUrl : profile.avatar_url;
+
+  function resetProjectDraft() {
+    setProjMediaType("image");
+    setProjTitle("");
+    setProjDesc("");
+    setProjImageUrl(null);
+    setProjVideoUrl("");
+    setProjError("");
+  }
+
+  async function saveQuickProfileMedia(nextAvatar: string | null, nextCover: string | null, notice: string) {
+    await updateUserProfile({
+      userId: profile.id,
+      display_name: profile.display_name,
+      avatar_url: nextAvatar,
+      cover_url: nextCover,
+      governorate: profile.governorate,
+      city: profile.city,
+      bio: profile.bio,
+      portfolio_url: profile.portfolio_url ?? null,
+      projects: profile.projects ?? [],
+      experience_level: profile.experience_level ?? "no_experience",
+      skills: profile.skills,
+      interests: profile.interests,
+    });
+    onNotify(notice);
+  }
+
+  async function handleAvatarChange(event: ChangeEvent<HTMLInputElement>, saveImmediately = false) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/") || file.size > 8 * 1024 * 1024) {
+      const msg = "اختر صورة صالحة بحجم لا يتجاوز ٨ ميجابايت.";
+      if (saveImmediately) onNotify(msg);
+      else setEditError(msg);
+      return;
+    }
+    setMediaBusy("avatar");
+    try {
+      const webpUrl = await convertImageToWebpDataUrl(file, {
+        maxSide: 220,
+        maxLength: AVATAR_WEBP_MAX_LENGTH,
+      });
+      setAvatarUrl(webpUrl);
+      setEditError("");
+      if (saveImmediately) {
+        await saveQuickProfileMedia(webpUrl, profile.cover_url ?? null, "تم تحديث الصورة الشخصية.");
+      }
+    } catch (error: unknown) {
+      const msg = "تعذر معالجة الصورة المختارة. جرّب صورة أخرى.";
+      if (saveImmediately && error instanceof Error && error.message !== "IMAGE_TOO_LARGE" && error.message !== "INVALID_IMAGE") {
+        onFatalError(error);
+      } else if (saveImmediately) {
+        onNotify(msg);
+      } else {
+        setEditError(msg);
+      }
+    } finally {
+      setMediaBusy(null);
+    }
+  }
+
+  async function handleCoverChange(event: ChangeEvent<HTMLInputElement>, saveImmediately = false) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/") || file.size > 10 * 1024 * 1024) {
+      const msg = "اختر صورة غلاف صالحة بحجم لا يتجاوز ١٠ ميجابايت.";
+      if (saveImmediately) onNotify(msg);
+      else setEditError(msg);
+      return;
+    }
+    setMediaBusy("cover");
+    try {
+      const webpUrl = await convertImageToWebpDataUrl(file, {
+        maxSide: 1000,
+        maxLength: COVER_WEBP_MAX_LENGTH,
+      });
+      setCoverUrl(webpUrl);
+      setEditError("");
+      if (saveImmediately) {
+        await saveQuickProfileMedia(profile.avatar_url, webpUrl, "تم تحديث صورة الغلاف.");
+      }
+    } catch (error: unknown) {
+      const msg = "تعذر معالجة صورة الغلاف. جرّب صورة أخرى.";
+      if (saveImmediately && error instanceof Error && error.message !== "IMAGE_TOO_LARGE" && error.message !== "INVALID_IMAGE") {
+        onFatalError(error);
+      } else if (saveImmediately) {
+        onNotify(msg);
+      } else {
+        setEditError(msg);
+      }
+    } finally {
+      setMediaBusy(null);
+    }
+  }
+
+  async function handleRemoveCover(saveImmediately = false) {
+    setCoverUrl(null);
+    if (!saveImmediately) return;
+    setMediaBusy("cover");
+    try {
+      await saveQuickProfileMedia(profile.avatar_url, null, "تمت إزالة صورة الغلاف.");
+    } catch (error: unknown) {
+      if (error instanceof Error) onFatalError(error);
+    } finally {
+      setMediaBusy(null);
+    }
+  }
+
+  async function handleProjectImageChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/") || file.size > 10 * 1024 * 1024) {
+      setProjError("اختر صورة صالحة للمشروع بحجم لا يتجاوز ١٠ ميجابايت.");
+      return;
+    }
+    setProjBusy(true);
+    setProjError("");
+    try {
+      const webpUrl = await convertImageToWebpDataUrl(file, {
+        maxSide: 960,
+        maxLength: PROJECT_IMAGE_MAX_LENGTH,
+      });
+      setProjImageUrl(webpUrl);
+    } catch {
+      setProjError("تعذر تجهيز الصورة. جرّب صورة أخرى.");
+    } finally {
+      setProjBusy(false);
+    }
+  }
+
+  function buildValidatedDraftProject(): PortfolioProject | null {
+    const cleanTitle = projTitle.trim().slice(0, 80);
+    if (cleanTitle.length < 2) {
+      setProjError("اكتب عنوانًا للمشروع (حرفان على الأقل).");
+      return null;
+    }
+
+    if (projMediaType === "image") {
+      if (!projImageUrl) {
+        setProjError("اختر صورة للمشروع أولًا.");
+        return null;
+      }
+      return {
+        id: crypto.randomUUID(),
+        title: cleanTitle,
+        description: projDesc.trim().slice(0, 300) || null,
+        image_url: projImageUrl,
+        video_drive_url: null,
+      };
+    }
+
+    const parsedDriveUrl = parseGoogleDriveVideoUrl(projVideoUrl);
+    if (!parsedDriveUrl) {
+      setProjError("أدخل رابط فيديو صحيحًا من Google Drive.");
+      return null;
+    }
+
+    return {
+      id: crypto.randomUUID(),
+      title: cleanTitle,
+      description: projDesc.trim().slice(0, 300) || null,
+      image_url: null,
+      video_drive_url: parsedDriveUrl,
+    };
+  }
+
+  async function handleAddStandaloneProject() {
+    if (savedProjects.length >= 3) {
+      setProjError("يمكنك إضافة ٣ مشاريع بحد أقصى.");
+      return;
+    }
+    const newProject = buildValidatedDraftProject();
+    if (!newProject) return;
+
+    setProjBusy(true);
+    setProjError("");
+    try {
+      await updateUserProfile({
+        userId: profile.id,
+        display_name: profile.display_name,
+        avatar_url: profile.avatar_url,
+        cover_url: profile.cover_url ?? null,
+        governorate: profile.governorate,
+        city: profile.city,
+        bio: profile.bio,
+        portfolio_url: profile.portfolio_url ?? null,
+        projects: [...savedProjects, newProject].slice(0, 3),
+        experience_level: profile.experience_level ?? "no_experience",
+        skills: profile.skills,
+        interests: profile.interests,
+      });
+      resetProjectDraft();
+      setAddingProject(false);
+      onNotify("تمت إضافة المشروع إلى ملفك الشخصي.");
+    } catch (error: unknown) {
+      if (error instanceof Error) onFatalError(error);
+    } finally {
+      setProjBusy(false);
+    }
+  }
+
+  async function handleDeleteStandaloneProject(projectId: string) {
+    setProjBusy(true);
+    try {
+      const nextProjects = savedProjects.filter((p) => p.id !== projectId);
+      await updateUserProfile({
+        userId: profile.id,
+        display_name: profile.display_name,
+        avatar_url: profile.avatar_url,
+        cover_url: profile.cover_url ?? null,
+        governorate: profile.governorate,
+        city: profile.city,
+        bio: profile.bio,
+        portfolio_url: profile.portfolio_url ?? null,
+        projects: nextProjects,
+        experience_level: profile.experience_level ?? "no_experience",
+        skills: profile.skills,
+        interests: profile.interests,
+      });
+      onNotify("تم حذف المشروع.");
+    } catch (error: unknown) {
+      if (error instanceof Error) onFatalError(error);
+    } finally {
+      setProjBusy(false);
+    }
+  }
+
+  function addCustomSkill() {
+    const val = customSkill.trim();
+    if (!val || val.length > 60 || skills.some((s) => s.toLowerCase() === val.toLowerCase())) return;
+    if (skills.length >= 20) {
+      setEditError("يمكنك اختيار ٢٠ مهارة بحد أقصى.");
+      return;
+    }
+    setSkills((current) => [...current, val]);
+    setCustomSkill("");
+    setEditError("");
+  }
+
+  async function handleSaveEdit() {
+    setEditError("");
+    const cleanName = displayName.trim();
+    if (cleanName.length < 2 || cleanName.length > 80) {
+      setEditError("اكتب اسمًا كاملًا بين حرفين و٨٠ حرفًا.");
+      return;
+    }
+    if (interests.length < 1) {
+      setEditError("اختر مجالًا واحدًا على الأقل في الفرص التي تهمك.");
+      return;
+    }
+
+    let cleanPortfolio: string | null = null;
+    if (portfolioUrl.trim()) {
+      cleanPortfolio = sanitizeExternalHttpUrl(portfolioUrl);
+      if (!cleanPortfolio) {
+        setEditError("أدخل رابط بورتفوليو صحيحًا يبدأ بـ https:// أو http://.");
+        return;
+      }
+    }
+
+    const finalProjects = [...projects];
+    const hasPendingProjectDraft = Boolean(
+      projTitle.trim() || projDesc.trim() || projImageUrl || projVideoUrl.trim(),
+    );
+    if (hasPendingProjectDraft) {
+      if (finalProjects.length >= 3) {
+        setEditError("الحد الأقصى للمشاريع هو ٣ مشاريع.");
+        return;
+      }
+      const drafted = buildValidatedDraftProject();
+      if (!drafted) {
+        setEditError("تحقق من بيانات المشروع المضاف أو امسح حقوله.");
+        return;
+      }
+      finalProjects.push(drafted);
+    }
+
+    setSaving(true);
+    try {
+      await updateUserProfile({
+        userId: profile.id,
+        display_name: cleanName,
+        avatar_url: avatarUrl,
+        cover_url: coverUrl,
+        governorate: governorate.trim() || null,
+        city: city.trim() || null,
+        bio: bio.trim() || null,
+        portfolio_url: cleanPortfolio,
+        projects: finalProjects.slice(0, 3),
+        experience_level: experienceLevel,
+        skills,
+        interests,
+      });
+      resetProjectDraft();
+      setEditing(false);
+      onNotify("تم حفظ تعديلات ملفك الشخصي بنجاح.");
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message === "INVALID_PORTFOLIO_URL") {
+        setEditError("أدخل رابط بورتفوليو صحيحًا.");
+      } else if (error instanceof Error) {
+        onFatalError(error);
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <section className="profile-page">
       <div className="profile-cover">
-        <div className="profile-avatar large">
-          {profile.avatar_url ? <img src={profile.avatar_url} alt="" /> : getInitials(profile.display_name)}
+        {activeCover && (
+          <div style={{ position: "absolute", inset: 0, overflow: "hidden" }}>
+            <img
+              src={activeCover}
+              alt="صورة الغلاف"
+              onClick={!editing ? () => onPreviewImage(activeCover, "صورة الغلاف") : undefined}
+              style={{
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+                display: "block",
+                cursor: !editing ? "pointer" : "default",
+              }}
+            />
+          </div>
+        )}
+
+        <div
+          style={{
+            position: "absolute",
+            top: 10,
+            left: 12,
+            zIndex: 3,
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
+          <label
+            style={{
+              position: "relative",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              padding: "6px 10px",
+              borderRadius: 8,
+              background: "rgba(255, 255, 255, 0.92)",
+              border: "1px solid #d8e0d8",
+              color: "var(--ink)",
+              fontSize: 10,
+              fontWeight: 600,
+              cursor: mediaBusy ? "wait" : "pointer",
+            }}
+          >
+            <input
+              type="file"
+              accept="image/*"
+              disabled={mediaBusy !== null}
+              onChange={(e) => void handleCoverChange(e, !editing)}
+              style={{ position: "absolute", width: 1, height: 1, opacity: 0 }}
+            />
+            {mediaBusy === "cover" ? <LoaderCircle className="spin" size={13} /> : <Camera size={13} />}
+            <span>{activeCover ? "تغيير الغلاف" : "إضافة غلاف"}</span>
+          </label>
+          {activeCover && (
+            <button
+              type="button"
+              disabled={mediaBusy !== null}
+              onClick={() => void handleRemoveCover(!editing)}
+              aria-label="إزالة صورة الغلاف"
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 8,
+                background: "rgba(255, 255, 255, 0.92)",
+                border: "1px solid #d8e0d8",
+                color: "#8d5149",
+                display: "grid",
+                placeItems: "center",
+              }}
+            >
+              <Trash2 size={13} />
+            </button>
+          )}
+        </div>
+
+        <div className="profile-avatar large" style={{ zIndex: 2, overflow: "visible" }}>
+          <div
+            style={{
+              width: "100%",
+              height: "100%",
+              borderRadius: "50%",
+              overflow: "hidden",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            {activeAvatar ? (
+              <img
+                src={activeAvatar}
+                alt={profile.display_name}
+                onClick={!editing ? () => onPreviewImage(activeAvatar, profile.display_name) : undefined}
+                style={{ cursor: !editing ? "pointer" : "default" }}
+              />
+            ) : (
+              getInitials(profile.display_name)
+            )}
+          </div>
+          <label
+            title="تغيير الصورة الشخصية"
+            aria-label="تغيير الصورة الشخصية"
+            style={{
+              position: "absolute",
+              bottom: -3,
+              left: -3,
+              width: 24,
+              height: 24,
+              borderRadius: "50%",
+              background: "var(--green)",
+              color: "#fff",
+              border: "2px solid #fff",
+              display: "grid",
+              placeItems: "center",
+              cursor: mediaBusy ? "wait" : "pointer",
+            }}
+          >
+            <input
+              type="file"
+              accept="image/*"
+              disabled={mediaBusy !== null}
+              onChange={(e) => void handleAvatarChange(e, !editing)}
+              style={{ position: "absolute", width: 1, height: 1, opacity: 0 }}
+            />
+            {mediaBusy === "avatar" ? <LoaderCircle className="spin" size={12} /> : <Camera size={12} />}
+          </label>
         </div>
       </div>
-      <div className="profile-details">
-        <div className="profile-details-head">
-          <div>
-            <div className="person-name-row">
-              <h2>{profile.display_name}</h2>
+
+      {editing ? (
+        <div className="profile-details">
+          <div className="profile-details-head" style={{ marginBottom: 18 }}>
+            <div>
+              <h2>تعديل الملف الشخصي</h2>
+              <p>@{profile.username} · {accountLabel}</p>
             </div>
-            <p>
-              @{profile.username}
-              {location && (
-                <>
-                  {" "}
-                  <span>·</span> {location}
-                </>
+            <button
+              type="button"
+              className="cancel-button"
+              disabled={saving}
+              onClick={() => {
+                resetProjectDraft();
+                setEditError("");
+                setEditing(false);
+              }}
+            >
+              إلغاء
+            </button>
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+              gap: 12,
+              marginBottom: 18,
+            }}
+          >
+            <label className="avatar-upload" style={{ marginBottom: 0 }}>
+              <input
+                type="file"
+                accept="image/*"
+                disabled={mediaBusy !== null}
+                onChange={(e) => void handleAvatarChange(e, false)}
+              />
+              <span className="avatar-preview">
+                {avatarUrl ? <img src={avatarUrl} alt="" /> : <ImagePlus size={22} />}
+              </span>
+              <span>
+                <strong>تغيير الصورة الشخصية</strong>
+                <small>اختر صورة جديدة لملفك</small>
+              </span>
+            </label>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <label className="avatar-upload" style={{ marginBottom: 0, flex: 1 }}>
+                <input
+                  type="file"
+                  accept="image/*"
+                  disabled={mediaBusy !== null}
+                  onChange={(e) => void handleCoverChange(e, false)}
+                />
+                <span className="avatar-preview" style={{ borderRadius: 8, width: 76 }}>
+                  {coverUrl ? <img src={coverUrl} alt="" /> : <ImagePlus size={20} />}
+                </span>
+                <span>
+                  <strong>{coverUrl ? "تغيير صورة الغلاف" : "إضافة صورة غلاف"}</strong>
+                  <small>تظهر أعلى ملفك الشخصي</small>
+                </span>
+              </label>
+              {coverUrl && (
+                <button
+                  type="button"
+                  className="cancel-button"
+                  onClick={() => void handleRemoveCover(false)}
+                  style={{ color: "#8d5149", padding: "6px 8px" }}
+                  aria-label="إزالة صورة الغلاف"
+                >
+                  <Trash2 size={14} />
+                </button>
               )}
+            </div>
+          </div>
+
+          <div className="setup-fields">
+            <label>
+              <span>الاسم الكامل</span>
+              <input
+                value={displayName}
+                maxLength={80}
+                onChange={(e) => setDisplayName(e.target.value)}
+              />
+            </label>
+            <label>
+              <span>رابط الأعمال / البورتفوليو (اختياري)</span>
+              <input
+                value={portfolioUrl}
+                maxLength={300}
+                dir="ltr"
+                placeholder="https://behance.net/..."
+                onChange={(e) => setPortfolioUrl(e.target.value)}
+              />
+            </label>
+            <label>
+              <span>المحافظة</span>
+              <input
+                value={governorate}
+                maxLength={80}
+                onChange={(e) => setGovernorate(e.target.value)}
+              />
+            </label>
+            <label>
+              <span>المدينة</span>
+              <input
+                value={city}
+                maxLength={80}
+                onChange={(e) => setCity(e.target.value)}
+              />
+            </label>
+          </div>
+
+          <label className="setup-label">
+            <span>نبذة عني (يمكنك كتابة روابط داخل النبذة أيضًا)</span>
+            <textarea
+              value={bio}
+              maxLength={500}
+              rows={4}
+              placeholder="اكتب نبذة مختصرة عن خبرتك أو رابط معرض أعمالك..."
+              onChange={(e) => setBio(e.target.value)}
+            />
+          </label>
+
+          <div className="profile-section">
+            <h3>المهارات</h3>
+            <div className="selection-grid">
+              {profileSkillSuggestions.map((skill) => {
+                const selected = skills.includes(skill);
+                return (
+                  <button
+                    key={skill}
+                    type="button"
+                    className={`selection-chip ${selected ? "selected" : ""}`}
+                    onClick={() =>
+                      setSkills((current) =>
+                        selected
+                          ? current.filter((item) => item !== skill)
+                          : current.length < 20
+                            ? [...current, skill]
+                            : current,
+                      )
+                    }
+                  >
+                    {selected && <Check size={14} />}
+                    {skill}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="custom-skill-form">
+              <input
+                value={customSkill}
+                maxLength={60}
+                placeholder="أضف مهارة أخرى"
+                onChange={(e) => setCustomSkill(e.target.value)}
+              />
+              <button type="button" disabled={!customSkill.trim()} onClick={addCustomSkill}>
+                إضافة
+              </button>
+            </div>
+            {skills.length > 0 && (
+              <div className="chosen-skills">
+                {skills.map((skill) => (
+                  <button
+                    type="button"
+                    key={skill}
+                    onClick={() => setSkills((curr) => curr.filter((s) => s !== skill))}
+                  >
+                    {skill}
+                    <span aria-hidden="true">×</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="profile-section">
+            <h3>مستوى الخبرة</h3>
+            <div className="selection-grid">
+              {profileExperienceOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={`selection-chip ${experienceLevel === option.value ? "selected" : ""}`}
+                  onClick={() => setExperienceLevel(option.value)}
+                >
+                  {experienceLevel === option.value && <Check size={14} />}
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="profile-section">
+            <h3>الفرص التي تهمني</h3>
+            <div className="selection-grid">
+              {profileInterestOptions.map((item) => {
+                const selected = interests.includes(item);
+                return (
+                  <button
+                    key={item}
+                    type="button"
+                    className={`selection-chip ${selected ? "selected" : ""}`}
+                    onClick={() =>
+                      setInterests((current) =>
+                        selected
+                          ? current.filter((x) => x !== item)
+                          : current.length < 20
+                            ? [...current, item]
+                            : current,
+                      )
+                    }
+                  >
+                    {selected && <Check size={14} />}
+                    {item}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="profile-section">
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+              <h3 style={{ margin: 0 }}>أعمالي ومشاريعي ({formatArabicNumber(projects.length)} / ٣)</h3>
+            </div>
+            {projects.length > 0 && (
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+                  gap: 12,
+                  marginBottom: 14,
+                }}
+              >
+                {projects.map((proj) => (
+                  <ProjectCard
+                    key={proj.id}
+                    project={proj}
+                    onPreviewImage={onPreviewImage}
+                    onDelete={() =>
+                      setProjects((current) => current.filter((item) => item.id !== proj.id))
+                    }
+                  />
+                ))}
+              </div>
+            )}
+
+            {projects.length < 3 && (
+              <div
+                style={{
+                  border: "1px dashed #d3dcd4",
+                  borderRadius: 10,
+                  padding: 14,
+                  background: "#f9faf8",
+                  display: "grid",
+                  gap: 10,
+                }}
+              >
+                <strong style={{ fontSize: 12, color: "var(--ink)" }}>إضافة مشروع جديد</strong>
+                <div className="selection-grid" style={{ gap: 8 }}>
+                  <button
+                    type="button"
+                    className={`selection-chip ${projMediaType === "image" ? "selected" : ""}`}
+                    onClick={() => {
+                      setProjMediaType("image");
+                      setProjVideoUrl("");
+                      setProjError("");
+                    }}
+                  >
+                    <ImagePlus size={14} /> صورة
+                  </button>
+                  <button
+                    type="button"
+                    className={`selection-chip ${projMediaType === "video" ? "selected" : ""}`}
+                    onClick={() => {
+                      setProjMediaType("video");
+                      setProjImageUrl(null);
+                      setProjError("");
+                    }}
+                  >
+                    <Video size={14} /> فيديو
+                  </button>
+                </div>
+                <div className="setup-fields" style={{ marginBottom: 0 }}>
+                  <label style={projMediaType === "image" ? { gridColumn: "1 / -1" } : undefined}>
+                    <span>عنوان المشروع</span>
+                    <input
+                      value={projTitle}
+                      maxLength={80}
+                      placeholder="مثال: تصميم هوية بصرية"
+                      onChange={(e) => setProjTitle(e.target.value)}
+                    />
+                  </label>
+                  {projMediaType === "video" && (
+                    <label>
+                      <span>رابط فيديو من Google Drive</span>
+                      <input
+                        value={projVideoUrl}
+                        maxLength={300}
+                        dir="ltr"
+                        placeholder="https://drive.google.com/file/d/..."
+                        onChange={(e) => setProjVideoUrl(e.target.value)}
+                      />
+                    </label>
+                  )}
+                </div>
+                <label className="setup-label" style={{ marginTop: 0 }}>
+                  <span>وصف مختصر (اختياري)</span>
+                  <textarea
+                    value={projDesc}
+                    maxLength={300}
+                    rows={2}
+                    placeholder="تفاصيل سريعة عن المشروع..."
+                    onChange={(e) => setProjDesc(e.target.value)}
+                  />
+                </label>
+                {projMediaType === "image" && (
+                  <label className="avatar-upload" style={{ marginBottom: 0 }}>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => void handleProjectImageChange(e)}
+                    />
+                    <span className="avatar-preview" style={{ borderRadius: 8 }}>
+                      {projImageUrl ? <img src={projImageUrl} alt="" /> : <ImagePlus size={20} />}
+                    </span>
+                    <span>
+                      <strong>{projImageUrl ? "تم اختيار صورة المشروع" : "اختر صورة للمشروع"}</strong>
+                      <small>ارفع صورة واضحة من جهازك</small>
+                    </span>
+                  </label>
+                )}
+                {projError && (
+                  <div className="auth-message error" role="alert" style={{ marginBottom: 0 }}>
+                    {projError}
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    type="button"
+                    className="cancel-button"
+                    disabled={projBusy}
+                    onClick={() => {
+                      const created = buildValidatedDraftProject();
+                      if (!created) return;
+                      setProjects((curr) => [...curr, created]);
+                      resetProjectDraft();
+                    }}
+                  >
+                    <Plus size={14} /> إدراج في القائمة
+                  </button>
+                  {projMediaType === "image" && projImageUrl && (
+                    <button
+                      type="button"
+                      className="cancel-button"
+                      onClick={() => setProjImageUrl(null)}
+                    >
+                      إزالة الصورة
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {editError && (
+            <div className="auth-message error" role="alert" style={{ marginTop: 14 }}>
+              {editError}
+            </div>
+          )}
+
+          <div className="dialog-actions" style={{ marginTop: 18 }}>
+            <button
+              type="button"
+              className="primary-button"
+              disabled={saving || projBusy}
+              onClick={() => void handleSaveEdit()}
+            >
+              {saving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
+              حفظ التعديلات
+            </button>
+            <button
+              type="button"
+              className="cancel-button"
+              disabled={saving}
+              onClick={() => {
+                resetProjectDraft();
+                setEditError("");
+                setEditing(false);
+              }}
+            >
+              إلغاء
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="profile-details">
+          <div className="profile-details-head">
+            <div>
+              <div className="person-name-row">
+                <h2>{profile.display_name}</h2>
+              </div>
+              <p>
+                @{profile.username} <span>·</span> {accountLabel}
+                {location && (
+                  <>
+                    {" "}
+                    <span>·</span> {location}
+                  </>
+                )}
+              </p>
+            </div>
+            <button
+              type="button"
+              className="cancel-button"
+              onClick={() => {
+                resetProjectDraft();
+                setEditError("");
+                setAddingProject(false);
+                setEditing(true);
+              }}
+              style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+            >
+              <Pencil size={14} /> تعديل الملف الشخصي
+            </button>
+          </div>
+
+          <div className="profile-section">
+            <h3>نبذة عني</h3>
+            {profile.bio ? (
+              <BioTextWithLinks text={profile.bio} />
+            ) : (
+              <p>لم تُضف نبذة بعد.</p>
+            )}
+            {profile.portfolio_url && (
+              <div style={{ marginTop: 10 }}>
+                <a
+                  href={profile.portfolio_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="cancel-button"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    textDecoration: "none",
+                    color: "var(--green)",
+                    fontWeight: 600,
+                  }}
+                >
+                  <Link2 size={14} />
+                  <span>رابط الأعمال / البورتفوليو</span>
+                  <ExternalLink size={13} />
+                </a>
+              </div>
+            )}
+          </div>
+
+          <div className="profile-section">
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 10,
+                marginBottom: 10,
+              }}
+            >
+              <h3 style={{ margin: 0 }}>
+                أعمالي ومشاريعي ({formatArabicNumber(savedProjects.length)} / ٣)
+              </h3>
+              {savedProjects.length < 3 && !addingProject && (
+                <button
+                  type="button"
+                  className="connect-button"
+                  onClick={() => {
+                    resetProjectDraft();
+                    setAddingProject(true);
+                  }}
+                >
+                  <Plus size={14} /> إضافة مشروع
+                </button>
+              )}
+            </div>
+
+            {savedProjects.length > 0 ? (
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+                  gap: 12,
+                }}
+              >
+                {savedProjects.map((proj) => (
+                  <ProjectCard
+                    key={proj.id}
+                    project={proj}
+                    onPreviewImage={onPreviewImage}
+                    onDelete={() => void handleDeleteStandaloneProject(proj.id)}
+                  />
+                ))}
+              </div>
+            ) : !addingProject ? (
+              <p>لم تُضف مشاريع بعد. يمكنك إضافة حتى ٣ مشاريع بصور أو فيديوهات Google Drive.</p>
+            ) : null}
+
+            {addingProject && savedProjects.length < 3 && (
+              <div
+                style={{
+                  marginTop: savedProjects.length > 0 ? 14 : 0,
+                  border: "1px dashed #d3dcd4",
+                  borderRadius: 10,
+                  padding: 14,
+                  background: "#f9faf8",
+                  display: "grid",
+                  gap: 10,
+                }}
+              >
+                <div className="selection-grid" style={{ gap: 8 }}>
+                  <button
+                    type="button"
+                    className={`selection-chip ${projMediaType === "image" ? "selected" : ""}`}
+                    onClick={() => {
+                      setProjMediaType("image");
+                      setProjVideoUrl("");
+                      setProjError("");
+                    }}
+                  >
+                    <ImagePlus size={14} /> صورة
+                  </button>
+                  <button
+                    type="button"
+                    className={`selection-chip ${projMediaType === "video" ? "selected" : ""}`}
+                    onClick={() => {
+                      setProjMediaType("video");
+                      setProjImageUrl(null);
+                      setProjError("");
+                    }}
+                  >
+                    <Video size={14} /> فيديو
+                  </button>
+                </div>
+                <div className="setup-fields" style={{ marginBottom: 0 }}>
+                  <label style={projMediaType === "image" ? { gridColumn: "1 / -1" } : undefined}>
+                    <span>عنوان المشروع</span>
+                    <input
+                      value={projTitle}
+                      maxLength={80}
+                      placeholder="مثال: موقع تعريفي لشركة"
+                      onChange={(e) => setProjTitle(e.target.value)}
+                    />
+                  </label>
+                  {projMediaType === "video" && (
+                    <label>
+                      <span>رابط فيديو من Google Drive</span>
+                      <input
+                        value={projVideoUrl}
+                        maxLength={300}
+                        dir="ltr"
+                        placeholder="https://drive.google.com/file/d/..."
+                        onChange={(e) => setProjVideoUrl(e.target.value)}
+                      />
+                    </label>
+                  )}
+                </div>
+                <label className="setup-label" style={{ marginTop: 0 }}>
+                  <span>وصف مختصر (اختياري)</span>
+                  <textarea
+                    value={projDesc}
+                    maxLength={300}
+                    rows={2}
+                    placeholder="تفاصيل سريعة عن المشروع..."
+                    onChange={(e) => setProjDesc(e.target.value)}
+                  />
+                </label>
+                {projMediaType === "image" && (
+                  <label className="avatar-upload" style={{ marginBottom: 0 }}>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => void handleProjectImageChange(e)}
+                    />
+                    <span className="avatar-preview" style={{ borderRadius: 8 }}>
+                      {projImageUrl ? <img src={projImageUrl} alt="" /> : <ImagePlus size={20} />}
+                    </span>
+                    <span>
+                      <strong>{projImageUrl ? "تم اختيار صورة المشروع" : "اختر صورة للمشروع"}</strong>
+                      <small>ارفع صورة واضحة من جهازك</small>
+                    </span>
+                  </label>
+                )}
+                {projError && (
+                  <div className="auth-message error" role="alert" style={{ marginBottom: 0 }}>
+                    {projError}
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={projBusy}
+                    onClick={() => void handleAddStandaloneProject()}
+                  >
+                    {projBusy ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}
+                    حفظ المشروع
+                  </button>
+                  {projMediaType === "image" && projImageUrl && (
+                    <button
+                      type="button"
+                      className="cancel-button"
+                      onClick={() => setProjImageUrl(null)}
+                    >
+                      إزالة الصورة
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="cancel-button"
+                    disabled={projBusy}
+                    onClick={() => {
+                      resetProjectDraft();
+                      setAddingProject(false);
+                    }}
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="profile-section">
+            <h3>المهارات</h3>
+            <div className="skill-list">
+              {profile.skills.length > 0 ? (
+                profile.skills.map((skill) => <span key={skill}>{skill}</span>)
+              ) : (
+                <span>لم تُضف مهارات بعد</span>
+              )}
+            </div>
+          </div>
+          <div className="profile-section">
+            <h3>الخبرة</h3>
+            <p>{experienceLabel(profile.experience_level)}</p>
+          </div>
+          <div className="profile-section">
+            <h3>الفرص التي تهمني</h3>
+            <div className="skill-list">
+              {profile.interests.map((interest) => (
+                <span key={interest}>{interest}</span>
+              ))}
+            </div>
+          </div>
+          <div className="profile-section beginner-tip">
+            <span>لا تحتاج إلى سيرة ذاتية أو خبرة سابقة للبدء — شارك ما تعرفه الآن.</span>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ProfilePreviewDialog({
+  member,
+  isSuperUser,
+  onClose,
+  onConnect,
+  onPreviewImage,
+}: {
+  member: DakhlProfile;
+  isSuperUser: boolean;
+  onClose: () => void;
+  onConnect: (member: DakhlProfile) => void;
+  onPreviewImage: (url: string, title: string) => void;
+}) {
+  const location = [member.city, member.governorate].filter(Boolean).join("، ") || "غير محدد";
+  const projects = member.projects ?? [];
+
+  return (
+    <div
+      className="dialog-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        className="dialog-card"
+        role="dialog"
+        aria-modal="true"
+        style={{ maxWidth: 620, maxHeight: "86vh", overflowY: "auto" }}
+      >
+        <button className="dialog-close" onClick={onClose} aria-label="إغلاق" style={{ zIndex: 2 }}>
+          <X size={19} />
+        </button>
+
+        {member.cover_url && (
+          <div
+            style={{
+              height: 112,
+              margin: "-24px -24px 14px",
+              borderRadius: "4px 16px 0 0",
+              overflow: "hidden",
+              background: "#dfe8cf",
+            }}
+          >
+            <img
+              src={member.cover_url}
+              alt={`غلاف ${member.display_name}`}
+              onClick={() => onPreviewImage(member.cover_url!, `غلاف ${member.display_name}`)}
+              style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", cursor: "pointer" }}
+            />
+          </div>
+        )}
+
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+          <div className="person-avatar blue" style={{ overflow: "hidden", width: 52, height: 52 }}>
+            {member.avatar_url ? (
+              <img
+                src={member.avatar_url}
+                alt={member.display_name}
+                onClick={() => onPreviewImage(member.avatar_url!, member.display_name)}
+                style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "50%", cursor: "pointer" }}
+              />
+            ) : (
+              getInitials(member.display_name)
+            )}
+          </div>
+          <div>
+            <h2 style={{ margin: 0 }}>{member.display_name}</h2>
+            <p className="dialog-description" style={{ margin: "2px 0 0" }}>
+              @{member.username} · {experienceLabel(member.experience_level)} · {location}
             </p>
           </div>
         </div>
-        <div className="profile-section">
-          <h3>نبذة عني</h3>
-          <p>{profile.bio || "لم تُضف نبذة بعد."}</p>
+
+        <div className="profile-section" style={{ paddingTop: 10 }}>
+          <h3>نبذة</h3>
+          {member.bio ? <BioTextWithLinks text={member.bio} /> : <p>لا توجد نبذة مضافة.</p>}
+          {member.portfolio_url && (
+            <div style={{ marginTop: 10 }}>
+              <a
+                href={member.portfolio_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="cancel-button"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  textDecoration: "none",
+                  color: "var(--green)",
+                  fontWeight: 600,
+                }}
+              >
+                <Link2 size={14} />
+                <span>رابط الأعمال / البورتفوليو</span>
+                <ExternalLink size={13} />
+              </a>
+            </div>
+          )}
         </div>
-        <div className="profile-section">
-          <h3>المهارات</h3>
-          <div className="skill-list">
-            {profile.skills.length > 0 ? (
-              profile.skills.map((skill) => <span key={skill}>{skill}</span>)
-            ) : (
-              <span>لم تُضف مهارات بعد</span>
-            )}
+
+        {member.skills.length > 0 && (
+          <div className="profile-section">
+            <h3>المهارات</h3>
+            <div className="skill-list">
+              {member.skills.map((skill) => (
+                <span key={skill}>{skill}</span>
+              ))}
+            </div>
           </div>
+        )}
+
+        <div className="profile-section" style={{ borderBottom: 0 }}>
+          <h3 style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <FolderKanban size={14} />
+            أعمال ومشاريع ({formatArabicNumber(projects.length)})
+          </h3>
+          {projects.length > 0 ? (
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))",
+                gap: 12,
+                marginTop: 10,
+              }}
+            >
+              {projects.map((proj) => (
+                <ProjectCard key={proj.id} project={proj} onPreviewImage={onPreviewImage} />
+              ))}
+            </div>
+          ) : (
+            <p>لم يُضف مشاريع بعد.</p>
+          )}
         </div>
-        <div className="profile-section">
-          <h3>الخبرة</h3>
-          <p>{experienceLabel(profile.experience_level)}</p>
+
+        <div className="dialog-actions">
+          {!isSuperUser && (
+            <button type="button" className="primary-button" onClick={() => onConnect(member)}>
+              تواصل مع {member.display_name} <ArrowLeft size={15} />
+            </button>
+          )}
+          <button type="button" className="cancel-button" onClick={onClose}>
+            إغلاق
+          </button>
         </div>
-        <div className="profile-section">
-          <h3>الفرص التي تهمني</h3>
-          <div className="skill-list">
-            {profile.interests.map((interest) => (
-              <span key={interest}>{interest}</span>
-            ))}
-          </div>
-        </div>
-        <div className="profile-section beginner-tip">
-          <span>لا تحتاج إلى سيرة ذاتية أو خبرة سابقة للبدء — شارك ما تعرفه الآن.</span>
-        </div>
-      </div>
-    </section>
+      </section>
+    </div>
   );
 }
 
