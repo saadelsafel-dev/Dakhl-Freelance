@@ -388,6 +388,34 @@ service cloud.firestore {
           )
           || (
             isOwner(userId)
+            && (!('profile_completed' in existing()) || existing().profile_completed == false)
+            && incoming().profile_completed == true
+            && (
+              !('account_type' in existing())
+              || incoming().account_type == existing().account_type
+            )
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'username',
+              'display_name',
+              'avatar_url',
+              'cover_url',
+              'governorate',
+              'city',
+              'bio',
+              'portfolio_url',
+              'projects',
+              'experience_level',
+              'profile_completed',
+              'skills',
+              'interests',
+              'account_type',
+              'updatedAt'
+            ])
+            && existsAfter(/databases/$(database)/documents/usernames/$(incoming().username))
+            && getAfter(/databases/$(database)/documents/usernames/$(incoming().username)).data.userId == userId
+          )
+          || (
+            isOwner(userId)
             && !('account_type' in existing())
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'account_type',
@@ -426,6 +454,7 @@ service cloud.firestore {
       allow update: if false;
       allow delete: if isVerifiedUser()
         && isValidUsername(username)
+        && resource != null
         && existing().userId == request.auth.uid
         && (!existsAfter(/databases/$(database)/documents/profiles/$(request.auth.uid))
           || getAfter(/databases/$(database)/documents/profiles/$(request.auth.uid)).data.username != username);

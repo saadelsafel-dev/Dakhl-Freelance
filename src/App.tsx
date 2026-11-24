@@ -34,7 +34,7 @@ import {
   Wallet,
   X,
 } from "lucide-react";
-import { db, handleFirestoreError, OperationType } from "./lib/firebase";
+import { auth, db, handleFirestoreError, OperationType } from "./lib/firebase";
 import {
   AVATAR_WEBP_MAX_LENGTH,
   convertImageToWebpDataUrl,
@@ -195,6 +195,7 @@ function App({
         setWalletReady(true);
       },
       (error) => {
+        if (!auth.currentUser) return;
         try {
           handleFirestoreError(error, OperationType.GET, walletPath);
         } catch (wrapped: unknown) {
@@ -212,6 +213,7 @@ function App({
         setMyRequests(items);
       },
       (error) => {
+        if (!auth.currentUser) return;
         try {
           handleFirestoreError(error, OperationType.LIST, "topup_requests");
         } catch (wrapped: unknown) {
@@ -229,6 +231,7 @@ function App({
         setMyTransactions(items);
       },
       (error) => {
+        if (!auth.currentUser) return;
         try {
           handleFirestoreError(error, OperationType.LIST, "wallet_transactions");
         } catch (wrapped: unknown) {
@@ -244,6 +247,7 @@ function App({
         setWalletSettings(mapWalletSettingsDoc(snapshot.exists() ? snapshot.data() : undefined));
       },
       (error) => {
+        if (!auth.currentUser) return;
         try {
           handleFirestoreError(error, OperationType.GET, settingsPath);
         } catch (wrapped: unknown) {
@@ -275,6 +279,7 @@ function App({
         setAdminRequests(items);
       },
       (error) => {
+        if (!auth.currentUser) return;
         try {
           handleFirestoreError(error, OperationType.LIST, "topup_requests");
         } catch (wrapped: unknown) {
@@ -294,6 +299,7 @@ function App({
         setAdminWalletsReady(true);
       },
       (error) => {
+        if (!auth.currentUser) return;
         try {
           handleFirestoreError(error, OperationType.LIST, "wallets");
         } catch (wrapped: unknown) {
@@ -317,6 +323,7 @@ function App({
         setAdminProfiles(list);
       },
       (error) => {
+        if (!auth.currentUser) return;
         try {
           handleFirestoreError(error, OperationType.LIST, "profiles");
         } catch (wrapped: unknown) {
@@ -361,7 +368,7 @@ function App({
           expectedHasBalance,
           needsTypeBackfill,
         ).catch((error: unknown) => {
-          if (error instanceof Error) setFatalError(error);
+          console.error("Background profile sync skipped for user:", userProfile.id, error);
         });
       }
     }
@@ -383,6 +390,7 @@ function App({
         setFundedProfiles(list);
       },
       (error) => {
+        if (!auth.currentUser) return;
         try {
           handleFirestoreError(error, OperationType.LIST, "profiles");
         } catch (wrapped: unknown) {

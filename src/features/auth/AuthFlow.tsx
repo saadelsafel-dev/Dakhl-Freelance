@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import {
-  onAuthStateChanged,
+  getRedirectResult,
+  onIdTokenChanged,
   sendEmailVerification,
   signInWithPopup,
   signOut as firebaseSignOut,
@@ -19,6 +20,7 @@ import {
 import logo from "../../logo.png";
 import {
   auth,
+  authPersistenceReady,
   db,
   googleProvider,
   handleFirestoreError,
@@ -100,24 +102,45 @@ export default function AuthFlow({ children }: AuthFlowProps) {
   const [authReady, setAuthReady] = useState(false);
   const [authError, setAuthError] = useState("");
   const [profile, setProfile] = useState<DakhlProfile | null>(null);
+  const [profileUid, setProfileUid] = useState<string | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileError, setProfileError] = useState("");
   const [profileRefresh, setProfileRefresh] = useState(0);
   const [, setAuthTick] = useState(0);
   const [fatalError, setFatalError] = useState<Error | null>(null);
   const backfilledAccountTypeRef = useRef<string | null>(null);
+  const lastUidRef = useRef<string | null>(null);
+  const signingInRef = useRef(false);
 
   if (fatalError) {
     throw fatalError;
   }
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(
+    void authPersistenceReady.then(() => getRedirectResult(auth)).catch((error: unknown) => {
+      const code = getFirebaseAuthCode(error);
+      if (code && code !== "auth/no-auth-event") {
+        setAuthError(authErrorMessage(error));
+      }
+    });
+
+    const unsubscribe = onIdTokenChanged(
       auth,
       (nextUser) => {
+        const nextUid = nextUser?.uid ?? null;
+        if (nextUid !== lastUidRef.current) {
+          lastUidRef.current = nextUid;
+          setProfile(null);
+          setProfileUid(null);
+          setProfileError("");
+          setProfileLoading(Boolean(nextUser));
+          backfilledAccountTypeRef.current = null;
+        }
         setUser(nextUser);
         setAuthReady(true);
-        setAuthError("");
+        if (nextUser) {
+          setAuthError("");
+        }
       },
       (error) => {
         console.error("Could not restore Firebase Auth state.", error);
@@ -132,17 +155,19 @@ export default function AuthFlow({ children }: AuthFlowProps) {
   useEffect(() => {
     if (!authReady || !user) {
       setProfile(null);
+      setProfileUid(null);
       setProfileLoading(false);
       setProfileError("");
       return;
     }
 
-    const profilePath = `profiles/${user.uid}`;
+    const activeUid = user.uid;
+    const profilePath = `profiles/${activeUid}`;
     setProfileLoading(true);
     setProfileError("");
 
     const unsubscribe = onSnapshot(
-      doc(db, "profiles", user.uid),
+      doc(db, "profiles", activeUid),
       (snapshot) => {
         if (snapshot.exists()) {
           const data = snapshot.data();
@@ -151,10 +176,10 @@ export default function AuthFlow({ children }: AuthFlowProps) {
             typeof data.account_type !== "string" &&
             data.profile_completed &&
             user.emailVerified &&
-            backfilledAccountTypeRef.current !== user.uid
+            backfilledAccountTypeRef.current !== activeUid
           ) {
-            backfilledAccountTypeRef.current = user.uid;
-            void updateDoc(doc(db, "profiles", user.uid), {
+            backfilledAccountTypeRef.current = activeUid;
+            void updateDoc(doc(db, "profiles", activeUid), {
               account_type: "freelancer",
               updatedAt: serverTimestamp(),
             }).catch(() => {});
@@ -164,9 +189,14 @@ export default function AuthFlow({ children }: AuthFlowProps) {
         } else {
           setProfile(null);
         }
+        setProfileUid(activeUid);
         setProfileLoading(false);
       },
       (error) => {
+        if (!auth.currentUser) {
+          setProfileLoading(false);
+          return;
+        }
         try {
           handleFirestoreError(error, OperationType.GET, profilePath);
         } catch (wrappedError: unknown) {
@@ -187,22 +217,29 @@ export default function AuthFlow({ children }: AuthFlowProps) {
   }, [authReady, user?.uid, profileRefresh]);
 
   async function signInWithGoogle() {
+    if (signingInRef.current) return;
+    signingInRef.current = true;
     setAuthError("");
     try {
+      await authPersistenceReady;
       await signInWithPopup(auth, googleProvider);
     } catch (error: unknown) {
-      const code =
-        typeof error === "object" && error !== null && "code" in error
-          ? String((error as { code: unknown }).code)
-          : "";
-      if (code !== "auth/popup-closed-by-user" && code !== "auth/cancelled-popup-request") {
+      const code = getFirebaseAuthCode(error);
+      if (code === "auth/cancelled-popup-request") {
+        return;
+      }
+      if (code !== "auth/popup-closed-by-user") {
         console.error("Firebase Google sign-in failed.", error);
       }
       setAuthError(authErrorMessage(error));
+    } finally {
+      signingInRef.current = false;
     }
   }
 
   async function signOut() {
+    setAuthError("");
+    setProfileError("");
     try {
       await firebaseSignOut(auth);
     } catch (error: unknown) {
@@ -223,7 +260,9 @@ export default function AuthFlow({ children }: AuthFlowProps) {
     );
   }
 
-  if (profileLoading) return <LoadingPage label="جارٍ تحميل ملفك..." />;
+  if (profileLoading || profileUid !== user.uid) {
+    return <LoadingPage label="جارٍ تحميل ملفك..." />;
+  }
 
   if (profileError) {
     return (
@@ -240,13 +279,18 @@ export default function AuthFlow({ children }: AuthFlowProps) {
       <VerifyEmailPage
         email={user.email ?? ""}
         onSendVerification={async () => {
-          await sendEmailVerification(user);
+          const current = auth.currentUser ?? user;
+          await sendEmailVerification(current);
         }}
         onRefresh={async () => {
-          await user.reload();
-          await user.getIdToken(true);
+          const current = auth.currentUser ?? user;
+          await current.reload();
+          await current.getIdToken(true);
+          const refreshed = auth.currentUser ?? current;
+          setUser(refreshed);
           setAuthTick((value) => value + 1);
           setProfileRefresh((value) => value + 1);
+          return Boolean(refreshed.emailVerified);
         }}
         onSignOut={signOut}
       />
@@ -503,6 +547,7 @@ function Onboarding({
       const usernameRef = doc(db, "usernames", cleanUsername);
 
       try {
+        await user.getIdToken(true);
         await runTransaction(db, async (transaction) => {
           const [usernameSnap, profileSnap] = await Promise.all([
             transaction.get(usernameRef),
@@ -513,11 +558,20 @@ function Onboarding({
             throw new Error("USERNAME_TAKEN");
           }
 
+          let oldUsernameRefToDelete: ReturnType<typeof doc> | null = null;
           if (profileSnap.exists()) {
             const existingUsername = profileSnap.data().username;
             if (typeof existingUsername === "string" && existingUsername && existingUsername !== cleanUsername) {
-              transaction.delete(doc(db, "usernames", existingUsername));
+              const oldRef = doc(db, "usernames", existingUsername);
+              const oldUsernameSnap = await transaction.get(oldRef);
+              if (oldUsernameSnap.exists() && oldUsernameSnap.data().userId === user.uid) {
+                oldUsernameRefToDelete = oldRef;
+              }
             }
+          }
+
+          if (oldUsernameRefToDelete) {
+            transaction.delete(oldUsernameRefToDelete);
           }
 
           if (!usernameSnap.exists()) {
@@ -923,7 +977,7 @@ function VerifyEmailPage({
 }: {
   email: string;
   onSendVerification: () => Promise<void>;
-  onRefresh: () => Promise<void>;
+  onRefresh: () => Promise<boolean>;
   onSignOut: () => Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
@@ -937,8 +991,13 @@ function VerifyEmailPage({
     try {
       await onSendVerification();
       setNotice("تم إرسال رابط التفعيل إلى بريدك الإلكتروني. افتح الرابط ثم اضغط «تحققت من البريد».");
-    } catch {
-      setErr("تعذر إرسال رابط التفعيل حاليًا. حاول بعد قليل أو سجّل الدخول بحساب Google موثق.");
+    } catch (error: unknown) {
+      const code = getFirebaseAuthCode(error);
+      if (code === "auth/too-many-requests") {
+        setErr("تم إرسال عدة طلبات متتالية. انتظر دقيقة واحدة ثم أعد المحاولة.");
+      } else {
+        setErr("تعذر إرسال رابط التفعيل حاليًا. حاول بعد قليل أو سجّل الدخول بحساب Google موثق.");
+      }
     } finally {
       setBusy(false);
     }
@@ -946,9 +1005,13 @@ function VerifyEmailPage({
 
   async function handleRefresh() {
     setBusy(true);
+    setNotice("");
     setErr("");
     try {
-      await onRefresh();
+      const verified = await onRefresh();
+      if (!verified) {
+        setErr("لم يتم تأكيد البريد الإلكتروني بعد. افتح رسالة التفعيل في بريدك ثم اضغط مرة أخرى.");
+      }
     } catch {
       setErr("تعذر التحقق من الحالة الآن. حاول مرة أخرى.");
     } finally {
@@ -1033,23 +1096,50 @@ function getUserDisplayName(user: User) {
   return user.email?.split("@")[0]?.slice(0, DISPLAY_NAME_MAX) ?? "";
 }
 
+function getFirebaseAuthCode(error: unknown): string {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code: unknown }).code)
+    : "";
+}
+
 function authErrorMessage(error: unknown) {
-  const code =
-    typeof error === "object" && error !== null && "code" in error
-      ? String((error as { code: unknown }).code)
-      : "";
+  const code = getFirebaseAuthCode(error);
 
   if (code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request") {
     return "تم إغلاق نافذة تسجيل الدخول قبل إكمال العملية.";
   }
   if (code === "auth/popup-blocked") {
-    return "حظر المتصفح نافذة تسجيل الدخول. اسمح بالنوافذ المنبثقة ثم حاول مرة أخرى.";
+    return "حظر المتصفح نافذة تسجيل الدخول. اسمح بالنوافذ المنبثقة لهذا الموقع ثم حاول مرة أخرى.";
   }
   if (code === "auth/unauthorized-domain") {
-    return "هذا النطاق غير مصرح به في إعدادات Firebase Authentication.";
+    return "هذا النطاق غير مضاف في النطاقات المصرح بها داخل Firebase Authentication.";
+  }
+  if (code === "auth/operation-not-allowed") {
+    return "تسجيل الدخول عبر Google غير مفعّل حاليًا في إعدادات Firebase Authentication.";
+  }
+  if (code === "auth/operation-not-supported-in-this-environment") {
+    return "هذا المتصفح يمنع نوافذ تسجيل الدخول هنا. افتح التطبيق في نافذة متصفح عادية وأعد المحاولة.";
+  }
+  if (code === "auth/web-storage-unsupported") {
+    return "المتصفح يمنع حفظ بيانات الجلسة (Cookies / Storage). فعّل ملفات تعريف الارتباط ثم أعد المحاولة.";
+  }
+  if (code === "auth/account-exists-with-different-credential") {
+    return "هذا البريد مرتبط بطريقة دخول أخرى. سجّل الدخول بالطريقة السابقة نفسها.";
+  }
+  if (code === "auth/user-disabled") {
+    return "تم تعطيل هذا الحساب مؤقتًا. تواصل مع الإدارة للمساعدة.";
+  }
+  if (code === "auth/too-many-requests") {
+    return "تم إرسال محاولات دخول كثيرة متتالية. انتظر قليلًا ثم أعد المحاولة.";
+  }
+  if (code === "auth/user-token-expired" || code === "auth/invalid-credential") {
+    return "انتهت صلاحية جلسة الدخول. أعد تسجيل الدخول عبر Google.";
   }
   if (code === "auth/network-request-failed") {
     return "تعذر الاتصال بخدمة المصادقة. تحقق من اتصالك بالإنترنت.";
+  }
+  if (code === "auth/internal-error") {
+    return "حدث خطأ مؤقت في خدمة المصادقة. حدّث الصفحة وحاول مرة أخرى.";
   }
   return "تعذر إكمال تسجيل الدخول عبر Google. حاول مرة أخرى.";
 }
