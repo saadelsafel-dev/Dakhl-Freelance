@@ -532,10 +532,10 @@ function App({
     return () => unsubChatNotifs();
   }, [profile.id, section]);
 
+  const needsConnections =
+    isLocked || ["home", "discover", "messages", "assign", "notifications"].includes(section);
+
   useEffect(() => {
-    const needsConnections =
-      isLocked ||
-      ["home", "discover", "messages", "assign", "notifications"].includes(section);
     if (!needsConnections) {
       setIncomingRequests([]);
       setOutgoingRequests([]);
@@ -588,10 +588,13 @@ function App({
       unsubIncomingConn();
       unsubOutgoingConn();
     };
-  }, [isLocked, profile.id, section]);
+  }, [needsConnections, profile.id]);
+
+  const shouldLoadAdminData =
+    isSuperUser && (section === "admin" || section === "assign");
 
   useEffect(() => {
-    if (!isSuperUser || (section !== "admin" && section !== "assign")) {
+    if (!shouldLoadAdminData) {
       setAdminRequests([]);
       setAdminWallets({});
       setAdminWalletsReady(false);
@@ -669,7 +672,7 @@ function App({
       unsubAllWallets();
       unsubAllProfiles();
     };
-  }, [isSuperUser, section]);
+  }, [shouldLoadAdminData]);
 
   useEffect(() => {
     if (!isSuperUser || !adminWalletsReady) return;
