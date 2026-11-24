@@ -197,6 +197,7 @@ const baseNavItems: { id: Section; label: string; icon: typeof House }[] = [
 ];
 
 const DIRECTORY_PAGE_SIZE = 24;
+const DIRECTORY_CACHE_TTL_MS = 5 * 60 * 1000;
 
 const sectionTitles: Record<Section, string> = {
   home: "الرئيسية",
@@ -267,6 +268,9 @@ function App({
   const [directoryHasMore, setDirectoryHasMore] = useState(false);
   const [directoryLoading, setDirectoryLoading] = useState(false);
   const directoryCursorRef = useRef<QueryDocumentSnapshot | null>(null);
+  const directoryLoadedRef = useRef(false);
+  const directoryFetchedAtRef = useRef(0);
+  const directoryRequestInFlightRef = useRef(false);
   const [missingAccountTypeIds, setMissingAccountTypeIds] = useState<Record<string, boolean>>({});
   const [fundedProfiles, setFundedProfiles] = useState<DakhlProfile[]>([]);
   const syncedBalanceFlagsRef = useRef<Record<string, boolean>>({});
@@ -731,7 +735,12 @@ function App({
 
   useEffect(() => {
     if (!shouldLoadDirectory) return;
-    let cancelled = false;
+    const cacheIsFresh =
+      directoryLoadedRef.current &&
+      Date.now() - directoryFetchedAtRef.current < DIRECTORY_CACHE_TTL_MS;
+    if (cacheIsFresh || directoryRequestInFlightRef.current) return;
+
+    directoryRequestInFlightRef.current = true;
     setDirectoryLoading(true);
     setFundedProfiles([]);
     directoryCursorRef.current = null;
@@ -744,17 +753,18 @@ function App({
     );
     void getDocs(firstPageQuery)
       .then((snapshot) => {
-        if (cancelled) return;
         const list = snapshot.docs
           .map((d) => mapProfileDoc(d.id, d.data()))
           .filter((member) => member.account_type !== "client");
         setFundedProfiles(list);
+        directoryLoadedRef.current = true;
+        directoryFetchedAtRef.current = Date.now();
         directoryCursorRef.current =
           snapshot.docs.length > 0 ? snapshot.docs[snapshot.docs.length - 1] : null;
         setDirectoryHasMore(snapshot.size === DIRECTORY_PAGE_SIZE);
       })
       .catch((error: unknown) => {
-        if (!auth.currentUser || cancelled) return;
+        if (!auth.currentUser) return;
         try {
           handleFirestoreError(error, OperationType.LIST, "profiles");
         } catch (wrapped: unknown) {
@@ -762,19 +772,23 @@ function App({
         }
       })
       .finally(() => {
-        if (!cancelled) setDirectoryLoading(false);
+        directoryRequestInFlightRef.current = false;
+        setDirectoryLoading(false);
       });
-
-    return () => {
-      cancelled = true;
-      setDirectoryLoading(false);
-    };
   }, [shouldLoadDirectory]);
 
   const loadMoreDirectory = async () => {
     const cursor = directoryCursorRef.current;
-    if (!cursor || directoryLoading || !directoryHasMore) return;
+    if (
+      !cursor ||
+      directoryLoading ||
+      directoryRequestInFlightRef.current ||
+      !directoryHasMore
+    ) {
+      return;
+    }
 
+    directoryRequestInFlightRef.current = true;
     setDirectoryLoading(true);
     try {
       const nextPageQuery = query(
@@ -796,6 +810,7 @@ function App({
         directoryCursorRef.current = snapshot.docs[snapshot.docs.length - 1];
       }
       setDirectoryHasMore(snapshot.size === DIRECTORY_PAGE_SIZE);
+      directoryFetchedAtRef.current = Date.now();
     } catch (error: unknown) {
       if (!auth.currentUser) return;
       try {
@@ -804,6 +819,7 @@ function App({
         if (wrapped instanceof Error) setFatalError(wrapped);
       }
     } finally {
+      directoryRequestInFlightRef.current = false;
       setDirectoryLoading(false);
     }
   };
