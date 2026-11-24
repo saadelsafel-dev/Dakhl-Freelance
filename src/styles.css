@@ -1,7 +1,7 @@
-@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;450;500;550;600;650;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;500;600;700;800&display=swap");
 
 :root {
-  font-family: "IBM Plex Sans Arabic", "Segoe UI", Tahoma, sans-serif;
+  font-family: "Noto Sans Arabic", "Segoe UI", Tahoma, sans-serif;
   color: #202a27;
   background: #f7f8f6;
   font-synthesis: none;
@@ -442,17 +442,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
 /* DAKHL's visual language: workshop-green navigation, paper surfaces, and a live opportunity as the hero. */
 :root {
   color: #1d3129;
-  background: #f4f3ec;
+  background: #f7f8f5;
+  font-family: "Noto Sans Arabic", "Segoe UI", Tahoma, sans-serif;
   --ink: #1d3129;
   --muted: #64736a;
-  --line: #dedfd4;
-  --green: #164b3a;
-  --green-dark: #0d392d;
-  --mint: #e5eddc;
-  --white: #fffef9;
-  --canvas: #f4f3ec;
-  --lime: #d7e989;
-  --forest: #143f32;
+  --line: #e7eae5;
+  --green: #1f6d4d;
+  --green-dark: #17543b;
+  --mint: #edf5ef;
+  --white: #ffffff;
+  --canvas: #f7f8f5;
+  --lime: #edf7bd;
+  --forest: #174936;
 }
 
 body { background: var(--canvas); }
@@ -852,6 +853,436 @@ body { background: var(--canvas); }
 @media (max-width: 600px) {
   .notif-popover { left: -46px; }
   .notif-card { padding: 13px; gap: 10px; }
+}
+
+/* Refined marketplace UI: restrained green, bright surfaces, and clear hierarchy. */
+:root {
+  --ink: #17221b;
+  --muted: #69756e;
+  --line: #e5e8e4;
+  --green: #1e7048;
+  --green-dark: #155637;
+  --mint: #eff6f1;
+  --canvas: #f7f8f6;
+  --white: #ffffff;
+  font-family: "Noto Sans Arabic", "Segoe UI", Tahoma, sans-serif;
+}
+
+body {
+  background: var(--canvas);
+  letter-spacing: 0;
+}
+
+.topbar {
+  height: 72px;
+  background: rgba(255, 255, 255, 0.96);
+  border-bottom: 1px solid #edf0ec;
+  box-shadow: 0 1px 12px rgba(29, 49, 39, 0.025);
+  backdrop-filter: blur(12px);
+}
+
+.brand-logo-window {
+  filter: saturate(.9);
+}
+
+.global-search,
+.inline-search {
+  background: #f6f7f5;
+  border: 1px solid #edf0ec;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.global-search {
+  height: 44px;
+  padding-inline: 14px;
+}
+
+.global-search input,
+.inline-search input {
+  font-size: 14px;
+}
+
+.create-button,
+.primary-button,
+.banner-primary,
+.auth-submit {
+  border-radius: 9px;
+  font-weight: 700;
+  box-shadow: 0 3px 10px rgba(30, 112, 72, 0.10);
+}
+
+.create-button {
+  padding: 11px 16px;
+  font-size: 13px;
+}
+
+.prototype-notice {
+  background: #f1f5ef;
+  color: #668174;
+  border-bottom: 1px solid #edf1ea;
+  height: 32px;
+}
+
+.page-layout {
+  max-width: 1480px;
+  grid-template-columns: 220px minmax(520px, 1fr) 260px;
+  gap: 28px;
+  padding-inline: 32px;
+}
+
+.right-sidebar {
+  margin-top: 18px;
+  min-height: calc(100vh - 122px);
+  background: #173e31;
+  border-radius: 14px;
+  box-shadow: 0 8px 24px rgba(23, 62, 49, 0.09);
+}
+
+.sidebar-profile-copy strong {
+  font-size: 13px;
+}
+
+.nav-link {
+  min-height: 43px;
+  font-size: 13px;
+  border-radius: 9px;
+  margin-bottom: 2px;
+}
+
+.nav-link.active {
+  background: #e7f1a9;
+  color: #173e31;
+  box-shadow: none;
+}
+
+.main-content {
+  padding-top: 30px;
+}
+
+.content-heading h1 {
+  font-size: 26px;
+  color: var(--ink);
+  letter-spacing: -0.7px;
+}
+
+.welcome-banner {
+  min-height: 280px;
+  border: 1px solid #dfe8e1;
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at 18% 80%, rgba(183, 216, 187, 0.25), transparent 30%),
+    linear-gradient(135deg, #174936 0%, #1d5741 100%);
+  box-shadow: 0 12px 30px rgba(31, 71, 52, 0.08);
+  align-items: center;
+}
+
+.welcome-copy {
+  max-width: 54%;
+  padding-top: 0;
+}
+
+.welcome-copy h2 {
+  font-size: clamp(30px, 3vw, 42px);
+  line-height: 1.35;
+  margin: 12px 0 8px;
+  letter-spacing: -1px;
+  max-width: 440px;
+}
+
+.welcome-copy p {
+  font-size: 14px;
+  color: #d0ddd4;
+  line-height: 1.8;
+}
+
+.welcome-actions {
+  margin-top: 22px;
+}
+
+.banner-primary {
+  background: #eaf1ba;
+  color: #1a4434;
+  border-radius: 9px;
+  padding: 12px 17px;
+  font-size: 13px;
+  box-shadow: none;
+}
+
+.banner-primary:hover {
+  background: #f1f6c8;
+  color: #15382b;
+  transform: translateY(-1px);
+}
+
+.banner-link {
+  color: #eef5ef;
+  font-size: 13px;
+}
+
+.banner-art {
+  left: 22px;
+  top: 24px;
+  width: 260px;
+  height: 240px;
+}
+
+.opportunity-ticket {
+  width: 238px;
+  min-height: 214px;
+  border: 1px solid #e8eadf;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 16px 38px rgba(13, 45, 32, 0.18);
+  transform: rotate(-2deg);
+  left: 8px;
+  top: 5px;
+}
+
+.section-block {
+  margin-top: 32px;
+}
+
+.section-title-row h2 {
+  font-size: 18px;
+  color: var(--ink);
+  letter-spacing: -0.25px;
+}
+
+.text-link {
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.filter-chip,
+.inline-search {
+  border-radius: 8px;
+}
+
+.filter-chip {
+  min-height: 38px;
+  font-size: 12px;
+  padding-inline: 13px;
+}
+
+.filter-chip.selected {
+  background: #e8f1eb;
+  border-color: #dce9df;
+  color: #20593e;
+}
+
+.people-grid {
+  gap: 12px;
+}
+
+.person-card {
+  background: #fff;
+  border: 1px solid #e7ebe7;
+  border-top: 1px solid #e7ebe7;
+  border-radius: 12px;
+  padding: 17px;
+  box-shadow: 0 2px 9px rgba(36, 52, 43, 0.025);
+}
+
+.person-card:hover {
+  border-color: #d9e2dc;
+  box-shadow: 0 10px 24px rgba(36, 52, 43, 0.08);
+  transform: translateY(-3px);
+}
+
+.person-name-row h3 {
+  font-size: 14px;
+  margin-top: 11px;
+}
+
+.person-role {
+  font-size: 12px;
+  color: #66736c;
+}
+
+.person-location {
+  font-size: 11px;
+  color: #87938d;
+}
+
+.skill-list span {
+  border-radius: 7px;
+  background: #f2f5f2;
+  color: #59685f;
+  font-size: 10px;
+  padding: 5px 8px;
+}
+
+.connect-button {
+  font-size: 12px;
+  color: #246345;
+  border-radius: 7px;
+}
+
+.left-sidebar {
+  padding-top: 30px;
+}
+
+.balance-card {
+  background: #eef4ef;
+  border: 1px solid #dfe8e1;
+  color: #173e31;
+  border-radius: 12px;
+  padding: 18px;
+  box-shadow: 0 4px 15px rgba(43, 68, 54, 0.035);
+}
+
+.balance-card-top {
+  color: #64786d;
+  font-size: 12px;
+}
+
+.balance-card > strong {
+  font-size: 29px;
+}
+
+.balance-card > strong small {
+  color: #668176;
+}
+
+.balance-card > button {
+  border: 1px solid #cad8ce;
+  background: #fff;
+  color: #1e6043;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.wallet-icon {
+  background: #fff;
+  color: #3e7258;
+}
+
+.messages-panel,
+.transaction-card,
+.profile-page,
+.notif-card,
+.dialog-card {
+  border-color: #e5e9e5;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 5px 18px rgba(36, 52, 43, 0.035);
+}
+
+.chat-preview.current {
+  background: #eef5f0;
+}
+
+.chat-bubble.sent {
+  background: #dff1e6;
+  color: #1d3a2b;
+}
+
+.wallet-summary {
+  background: #173e31;
+  border-radius: 12px;
+}
+
+.profile-cover {
+  background: linear-gradient(135deg, #dfeadf, #eef3ea);
+}
+
+.mobile-nav {
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 -5px 18px rgba(32, 49, 40, 0.06);
+  backdrop-filter: blur(12px);
+}
+
+@media (max-width: 1180px) {
+  .page-layout {
+    grid-template-columns: 205px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 850px) {
+  .topbar {
+    height: 64px;
+  }
+
+  .page-layout {
+    padding-inline: 20px;
+  }
+
+  .main-content {
+    max-width: 760px;
+  }
+}
+
+@media (max-width: 600px) {
+  .topbar {
+    height: 59px;
+  }
+
+  .global-search {
+    height: 38px;
+    border-radius: 9px;
+  }
+
+  .global-search input {
+    font-size: 11px;
+  }
+
+  .create-button {
+    padding: 9px 10px;
+    border-radius: 8px;
+  }
+
+  .prototype-notice {
+    height: 30px;
+  }
+
+  .page-layout {
+    padding-inline: 15px;
+  }
+
+  .welcome-banner {
+    min-height: 258px;
+    border-radius: 12px;
+  }
+
+  .welcome-copy {
+    max-width: 68%;
+  }
+
+  .welcome-copy h2 {
+    font-size: 24px;
+  }
+
+  .welcome-copy p {
+    font-size: 11px;
+  }
+
+  .banner-primary {
+    padding: 10px 12px;
+  }
+
+  .banner-art {
+    opacity: .82;
+  }
+
+  .section-title-row h2 {
+    font-size: 15px;
+  }
+
+  .filter-chip {
+    min-height: 34px;
+    font-size: 10px;
+  }
+
+  .person-card {
+    border-radius: 11px;
+  }
+
+  .mobile-nav {
+    height: 68px;
+  }
 }
 
 .deal-steps-bar {
