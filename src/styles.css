@@ -1,7 +1,7 @@
-@import url("https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;500;600;700;800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;600;700;800&display=swap");
 
 :root {
-  font-family: "Noto Sans Arabic", "Segoe UI", Tahoma, sans-serif;
+  font-family: "Tajawal", "Segoe UI", Tahoma, sans-serif;
   color: #202a27;
   background: #f7f8f6;
   font-synthesis: none;
@@ -443,7 +443,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
 :root {
   color: #1d3129;
   background: #f7f8f5;
-  font-family: "Noto Sans Arabic", "Segoe UI", Tahoma, sans-serif;
+  font-family: "Tajawal", "Segoe UI", Tahoma, sans-serif;
   --ink: #1d3129;
   --muted: #64736a;
   --line: #e7eae5;
@@ -865,7 +865,7 @@ body { background: var(--canvas); }
   --mint: #eff6f1;
   --canvas: #f7f8f6;
   --white: #ffffff;
-  font-family: "Noto Sans Arabic", "Segoe UI", Tahoma, sans-serif;
+  font-family: "Tajawal", "Segoe UI", Tahoma, sans-serif;
 }
 
 body {
@@ -1050,9 +1050,28 @@ body {
 }
 
 .text-link {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
   color: var(--green);
-  font-size: 12px;
+  font: inherit;
+  font-size: 14px;
   font-weight: 700;
+  line-height: 1.5;
+  text-decoration: none;
+  cursor: pointer;
+  transition: color .15s ease;
+}
+
+.text-link:hover {
+  color: var(--green-dark);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .filter-chip,
@@ -1285,114 +1304,142 @@ body {
   }
 }
 
-.deal-steps-bar {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px 0;
-  border-bottom: 1px solid #eef0e9;
-}
-.deal-steps-track {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 5px;
-  font-size: 10px;
-}
-.deal-step {
-  padding: 3px 8px;
-  border-radius: 5px;
-  font-weight: 600;
-  background: #f2f4ee;
-  color: #7c877f;
-}
-.deal-step.done {
-  background: #e3f0e5;
-  color: #21593a;
-}
-.deal-step.current {
-  background: #e9f2c8;
-  color: #244932;
-  border: 1px solid #cedc9c;
-}
-.deal-step.cancelled {
-  background: #f6ebe8;
-  color: #8f4f45;
-}
-.deal-step-sep {
-  color: #b1bab2;
-  font-size: 10px;
-}
-.deal-header-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.deal-snooze-tag {
-  font-size: 10px;
-  font-weight: 600;
-  color: #826323;
-  background: #f8f1db;
-  padding: 4px 8px;
-  border-radius: 5px;
-}
 .deal-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  border-radius: 6px;
-  padding: 5px 10px;
-  font-size: 11px;
-  font-weight: 600;
+  gap: 7px;
+  min-height: 36px;
+  border-radius: 9px;
+  padding: 7px 13px;
+  font-size: 12px;
+  font-weight: 650;
   border: 1px solid transparent;
-  transition: background .15s, border-color .15s, opacity .15s;
+  transition: background .15s, border-color .15s, color .15s, box-shadow .15s, opacity .15s;
 }
 .deal-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
 .deal-btn.deliver {
-  background: #eaf3ec;
-  border-color: #cbe0cf;
-  color: #1f5a3a;
+  background: #eaf4ed;
+  border-color: #d6e8db;
+  color: #246442;
 }
 .deal-btn.deliver:hover:not(:disabled) {
-  background: #dcecdf;
+  background: #dcefe2;
+  border-color: #c3ddca;
 }
 .deal-btn.deliver-solid {
-  background: var(--green);
+  background: #1e7048;
+  border-color: #1e7048;
   color: #fff;
 }
 .deal-btn.deliver-solid:hover:not(:disabled) {
-  background: var(--green-dark);
+  background: #175637;
+  border-color: #175637;
 }
 .deal-btn.cancel {
-  background: #fbf1ef;
-  border-color: #ebd2cc;
-  color: #934b40;
+  background: #fff;
+  border-color: #ead9d5;
+  color: #96564b;
 }
 .deal-btn.cancel:hover:not(:disabled) {
-  background: #f6e4e0;
+  background: #fbf1ef;
+  border-color: #e6c6bf;
 }
 .deal-btn.cancel-solid {
   background: #a4493c;
+  border-color: #a4493c;
   color: #fff;
 }
 .deal-btn.cancel-solid:hover:not(:disabled) {
   background: #893b30;
+  border-color: #893b30;
 }
 .deal-btn.subtle {
   background: #fff;
-  border-color: #dce0d6;
-  color: #4f5e55;
+  border-color: #e1e7e2;
+  color: #526258;
 }
 .deal-btn.subtle:hover:not(:disabled) {
-  background: #f4f6f0;
+  background: #f5f8f5;
+  border-color: #d5dfd7;
+}
+.deal-menu-wrap {
+  position: relative;
+  flex: none;
+}
+.deal-menu-trigger {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: #68766d;
+  transition: background .15s, border-color .15s, color .15s;
+}
+.deal-menu-trigger:hover,
+.deal-menu-trigger.active {
+  background: #f1f5f1;
+  border-color: #e4ebe5;
+  color: #286344;
+}
+.deal-menu-trigger:focus-visible {
+  outline: 3px solid #9dc8b6;
+  outline-offset: 2px;
+}
+.deal-menu {
+  position: absolute;
+  z-index: 15;
+  top: calc(100% + 7px);
+  left: 0;
+  width: 190px;
+  padding: 5px;
+  border: 1px solid #e5eae6;
+  border-radius: 11px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(28, 48, 36, 0.14);
+}
+.deal-menu-status {
+  padding: 8px 10px;
+  border-bottom: 1px solid #edf0ed;
+  color: #796126;
+  font-size: 11px;
+  font-weight: 600;
+}
+.deal-menu-item {
+  width: 100%;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 600;
+  transition: background .15s, color .15s;
+}
+.deal-menu-item.deliver {
+  color: #246442;
+}
+.deal-menu-item.deliver:hover:not(:disabled) {
+  background: #eef6f0;
+}
+.deal-menu-item.cancel {
+  color: #96564b;
+}
+.deal-menu-item.cancel:hover:not(:disabled) {
+  background: #fbf1ef;
+}
+.deal-menu-item:disabled {
+  opacity: .55;
+  cursor: not-allowed;
 }
 .deal-confirm-bar {
   flex: none;
@@ -1512,21 +1559,102 @@ body {
 }
 
 @media (max-width: 600px) {
-  .deal-steps-bar {
-    padding: 7px 0;
-    gap: 6px;
-  }
-  .deal-step {
-    font-size: 9px;
-    padding: 3px 6px;
-  }
   .deal-btn {
-    font-size: 10px;
-    padding: 5px 8px;
+    min-height: 35px;
+    font-size: 11px;
+    padding: 6px 10px;
   }
   .deal-checkin-card {
     padding: 11px;
   }
 }
 
+/* Raise the type scale for comfortable reading across the app. */
+.app-shell :is(.global-search input, .inline-search input, .create-button, .primary-button, .nav-link, .banner-primary, .banner-link, .text-link, .filter-chip, .connect-button, .chat-bubble, .chat-compose input, .deal-btn, .deal-menu-item, .transaction-copy strong, .transaction-row > strong, .profile-section p, .profile-details-head p, .dialog-description, .dialog-actions .primary-button, .cancel-button, .field-label, .dialog-input, .fee-breakdown div, .fee-breakdown strong) {
+  font-size: 14px;
+}
+
+.app-shell :is(.prototype-notice, .sidebar-profile-copy span, .side-label, .person-role, .opportunity-meta, .opportunity-tags, .opportunity-page-intro span, .balance-card-top, .balance-card > button, .trust-note, .chat-preview-copy time, .chat-preview-copy p, .chat-header-copy span, .chat-notice, .chat-date, .chat-bubble time, .wallet-summary > div > span, .wallet-summary p, .wallet-info p, .transaction-copy span, .legal-footnote, .profile-section h3, .beginner-tip, .fee-breakdown small, .payment-hint, .dialog-demo, .toast, .deal-confirm-bar, .deal-terminal-banner, .deal-checkin-card p, .deal-list-pill) {
+  font-size: 12px;
+}
+
+.app-shell :is(.sidebar-profile-copy strong, .content-heading h1, .section-title-row h2, .welcome-copy p, .person-name-row h3, .opportunity-main h3, .opportunity-page-intro strong, .chat-list-title h3, .chat-preview-copy strong, .chat-header strong, .chat-compose input, .wallet-info strong, .transaction-card .section-title-row h2, .profile-details-head h2, .profile-section .skill-list span, .dialog-card h2) {
+  font-size: 16px;
+}
+
+.app-shell .content-heading h1 {
+  font-size: 28px;
+}
+
+.app-shell .welcome-copy h2 {
+  font-size: clamp(34px, 3vw, 42px);
+}
+
+.app-shell .welcome-copy p {
+  font-size: 14px;
+}
+
+.app-shell .section-title-row h2,
+.app-shell .dialog-card h2 {
+  font-size: 19px;
+}
+
+.app-shell .chat-compose input {
+  font-size: 15px;
+}
+
+.app-shell :is(.skill-list span, .person-location, .opportunity-skills span, .transaction-copy span, .deal-menu-status) {
+  font-size: 12px;
+}
+
+.auth-page :is(.auth-heading p, .setup-step > p, .auth-form label, .setup-fields label, .setup-label, .google-button, .auth-submit, .auth-switch, .auth-switch button, .auth-form input, .setup-fields input) {
+  font-size: 14px;
+}
+
+.auth-page :is(.auth-privacy, .auth-kicker, .field-error, .auth-divider) {
+  font-size: 12px;
+}
+
+.auth-heading h1,
+.setup-step h1 {
+  font-size: 28px;
+}
+
+@media (max-width: 600px) {
+  .app-shell :is(.global-search input, .inline-search input, .create-button, .primary-button, .nav-link, .banner-primary, .banner-link, .text-link, .filter-chip, .connect-button, .chat-bubble, .chat-compose input, .deal-btn, .deal-menu-item, .transaction-copy strong, .transaction-row > strong, .profile-section p, .profile-details-head p, .dialog-description, .dialog-actions .primary-button, .cancel-button, .field-label, .dialog-input, .fee-breakdown div, .fee-breakdown strong) {
+    font-size: 13px;
+  }
+
+  .app-shell :is(.prototype-notice, .sidebar-profile-copy span, .side-label, .person-role, .opportunity-meta, .opportunity-tags, .opportunity-page-intro span, .balance-card-top, .balance-card > button, .trust-note, .chat-preview-copy time, .chat-preview-copy p, .chat-header-copy span, .chat-notice, .chat-date, .chat-bubble time, .wallet-summary > div > span, .wallet-summary p, .wallet-info p, .transaction-copy span, .legal-footnote, .profile-section h3, .beginner-tip, .fee-breakdown small, .payment-hint, .dialog-demo, .toast, .deal-confirm-bar, .deal-terminal-banner, .deal-checkin-card p, .deal-list-pill) {
+    font-size: 11px;
+  }
+
+  .app-shell :is(.sidebar-profile-copy strong, .content-heading h1, .section-title-row h2, .welcome-copy p, .person-name-row h3, .opportunity-main h3, .opportunity-page-intro strong, .chat-list-title h3, .chat-preview-copy strong, .chat-header strong, .wallet-info strong, .transaction-card .section-title-row h2, .profile-details-head h2, .profile-section .skill-list span, .dialog-card h2) {
+    font-size: 15px;
+  }
+
+  .app-shell .content-heading h1,
+  .app-shell .mobile-greeting h1 {
+    font-size: 22px;
+  }
+
+  .app-shell .welcome-copy p {
+    font-size: 12px;
+  }
+
+  .app-shell .section-title-row h2,
+  .app-shell .dialog-card h2 {
+    font-size: 16px;
+  }
+
+  .app-shell .welcome-copy h2,
+  .auth-heading h1,
+  .setup-step h1 {
+    font-size: 24px;
+  }
+
+  .app-shell :is(.skill-list span, .person-location, .opportunity-skills span, .deal-menu-status) {
+    font-size: 11px;
+  }
+}
 

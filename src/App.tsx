@@ -29,6 +29,7 @@ import {
   LogOut,
   MapPin,
   MessageCircle,
+  MoreVertical,
   Pencil,
   Plus,
   RotateCcw,
@@ -2487,13 +2488,36 @@ function MessagesContent(props: {
 }) {
   const [mobileListOpen, setMobileListOpen] = useState(false);
   const [confirmAction, setConfirmAction] = useState<"deliver" | "cancel" | null>(null);
+  const [dealMenuOpen, setDealMenuOpen] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const dealMenuRef = useRef<HTMLDivElement | null>(null);
   const currentThread =
     props.chats.find((chat) => chat.id === props.activeChat) ?? props.chats[0] ?? null;
 
   useEffect(() => {
     setConfirmAction(null);
+    setDealMenuOpen(false);
   }, [currentThread?.id, currentThread?.dealStatus]);
+
+  useEffect(() => {
+    if (!dealMenuOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!dealMenuRef.current?.contains(event.target as Node)) {
+        setDealMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDealMenuOpen(false);
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [dealMenuOpen]);
 
   useEffect(() => {
     const el = scrollContainerRef.current;
@@ -2577,50 +2601,49 @@ function MessagesContent(props: {
                       : `آخر تفاعل ${formatElapsedQuietArabic(currentThread.inactiveDurationMs)}`}
                 </span>
               </div>
-            </div>
-
-            <div className="deal-steps-bar" aria-label="خطوات المعاملة">
-              <div className="deal-steps-track">
-                <span className="deal-step done">١. القبول</span>
-                <span className="deal-step-sep">←</span>
-                <span
-                  className={`deal-step ${
-                    isActiveDeal ? "current" : isDelivered ? "done" : "cancelled"
-                  }`}
-                >
-                  ٢. التواصل والتنفيذ
-                </span>
-                <span className="deal-step-sep">←</span>
-                <span
-                  className={`deal-step ${
-                    isDelivered ? "done" : isCancelled ? "cancelled" : "upcoming"
-                  }`}
-                >
-                  ٣. {isDelivered ? "تم التسليم" : isCancelled ? "أُلغيت" : "التسليم أو الإلغاء"}
-                </span>
-              </div>
-
               {isActiveDeal && !confirmAction && (
-                <div className="deal-header-actions">
-                  {currentThread.deliveryCheckStatus === "not_delivered" && (
-                    <span className="deal-snooze-tag">لسا مسلمش</span>
+                <div className="deal-menu-wrap" ref={dealMenuRef}>
+                  <button
+                    type="button"
+                    className={`deal-menu-trigger ${dealMenuOpen ? "active" : ""}`}
+                    aria-label="خيارات المعاملة"
+                    aria-expanded={dealMenuOpen}
+                    aria-controls="deal-actions-menu"
+                    onClick={() => setDealMenuOpen((open) => !open)}
+                  >
+                    <MoreVertical size={19} />
+                  </button>
+                  {dealMenuOpen && (
+                    <div className="deal-menu" id="deal-actions-menu" aria-label="خيارات المعاملة">
+                      {currentThread.deliveryCheckStatus === "not_delivered" && (
+                        <div className="deal-menu-status">لسا مسلمش</div>
+                      )}
+                      <button
+                        type="button"
+                        className="deal-menu-item deliver"
+                        disabled={isBusy}
+                        onClick={() => {
+                          setDealMenuOpen(false);
+                          setConfirmAction("deliver");
+                        }}
+                      >
+                        <CheckCircle2 size={16} />
+                        سلمت
+                      </button>
+                      <button
+                        type="button"
+                        className="deal-menu-item cancel"
+                        disabled={isBusy}
+                        onClick={() => {
+                          setDealMenuOpen(false);
+                          setConfirmAction("cancel");
+                        }}
+                      >
+                        <RotateCcw size={16} />
+                        إلغاء المعاملة
+                      </button>
+                    </div>
                   )}
-                  <button
-                    type="button"
-                    className="deal-btn deliver"
-                    disabled={isBusy}
-                    onClick={() => setConfirmAction("deliver")}
-                  >
-                    <CheckCircle2 size={13} /> سلمت
-                  </button>
-                  <button
-                    type="button"
-                    className="deal-btn cancel"
-                    disabled={isBusy}
-                    onClick={() => setConfirmAction("cancel")}
-                  >
-                    <RotateCcw size={13} /> إلغاء المعاملة
-                  </button>
                 </div>
               )}
             </div>
