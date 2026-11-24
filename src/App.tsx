@@ -1,5 +1,17 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { collection, doc, onSnapshot, query, where } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  documentId,
+  getDocs,
+  limit,
+  onSnapshot,
+  orderBy,
+  query,
+  startAfter,
+  where,
+  type QueryDocumentSnapshot,
+} from "firebase/firestore";
 import logo from "./logo.png";
 import {
   ArrowDownLeft,
@@ -184,6 +196,8 @@ const baseNavItems: { id: Section; label: string; icon: typeof House }[] = [
   { id: "wallet", label: "المحفظة", icon: Wallet },
 ];
 
+const DIRECTORY_PAGE_SIZE = 24;
+
 const sectionTitles: Record<Section, string> = {
   home: "الرئيسية",
   discover: "اكتشف أشخاصًا",
@@ -232,6 +246,7 @@ function App({
   const [myTransactions, setMyTransactions] = useState<WalletTransactionRecord[]>([]);
 
   const [notifications, setNotifications] = useState<NotificationRecord[]>([]);
+  const [unreadNotifications, setUnreadNotifications] = useState<NotificationRecord[]>([]);
   const [incomingRequests, setIncomingRequests] = useState<ConnectionRequestRecord[]>([]);
   const [outgoingRequests, setOutgoingRequests] = useState<ConnectionRequestRecord[]>([]);
   const [notifPopoverOpen, setNotifPopoverOpen] = useState(false);
@@ -249,6 +264,9 @@ function App({
   const [adminWallets, setAdminWallets] = useState<Record<string, WalletRecord>>({});
   const [adminWalletsReady, setAdminWalletsReady] = useState(false);
   const [adminProfiles, setAdminProfiles] = useState<DakhlProfile[]>([]);
+  const [directoryHasMore, setDirectoryHasMore] = useState(false);
+  const [directoryLoading, setDirectoryLoading] = useState(false);
+  const directoryCursorRef = useRef<QueryDocumentSnapshot | null>(null);
   const [missingAccountTypeIds, setMissingAccountTypeIds] = useState<Record<string, boolean>>({});
   const [fundedProfiles, setFundedProfiles] = useState<DakhlProfile[]>([]);
   const syncedBalanceFlagsRef = useRef<Record<string, boolean>>({});
@@ -297,9 +315,6 @@ function App({
   }, [notifPopoverOpen]);
 
   useEffect(() => {
-    initialNotifLoadedRef.current = false;
-    seenNotifIdsRef.current = {};
-
     const walletPath = `wallets/${profile.id}`;
     const unsubWallet = onSnapshot(
       doc(db, "wallets", profile.id),
@@ -317,41 +332,60 @@ function App({
       },
     );
 
-    const reqQuery = query(collection(db, "topup_requests"), where("userId", "==", profile.id));
-    const unsubRequests = onSnapshot(
-      reqQuery,
-      (snapshot) => {
-        const items = snapshot.docs.map((d) => mapTopupRequestDoc(d.id, d.data()));
-        items.sort((a, b) => b.createdAtMs - a.createdAtMs);
-        setMyRequests(items);
-      },
-      (error) => {
-        if (!auth.currentUser) return;
-        try {
-          handleFirestoreError(error, OperationType.LIST, "topup_requests");
-        } catch (wrapped: unknown) {
-          if (wrapped instanceof Error) setFatalError(wrapped);
-        }
-      },
-    );
+    return () => unsubWallet();
+  }, [profile.id]);
 
-    const txQuery = query(collection(db, "wallet_transactions"), where("userId", "==", profile.id));
-    const unsubTx = onSnapshot(
-      txQuery,
-      (snapshot) => {
-        const items = snapshot.docs.map((d) => mapTransactionDoc(d.id, d.data()));
-        items.sort((a, b) => b.createdAtMs - a.createdAtMs);
-        setMyTransactions(items);
-      },
-      (error) => {
-        if (!auth.currentUser) return;
-        try {
-          handleFirestoreError(error, OperationType.LIST, "wallet_transactions");
-        } catch (wrapped: unknown) {
-          if (wrapped instanceof Error) setFatalError(wrapped);
-        }
-      },
-    );
+  useEffect(() => {
+    const isWalletView = section === "wallet" || (isLocked && section !== "messages");
+    const isAdminView = isSuperUser && section === "admin";
+    if (!isWalletView && !isAdminView) {
+      setMyRequests([]);
+      setMyTransactions([]);
+      return;
+    }
+
+    let unsubRequests = () => {};
+    let unsubTx = () => {};
+    if (isWalletView && !isSuperUser) {
+      const reqQuery = query(collection(db, "topup_requests"), where("userId", "==", profile.id));
+      unsubRequests = onSnapshot(
+        reqQuery,
+        (snapshot) => {
+          const items = snapshot.docs.map((d) => mapTopupRequestDoc(d.id, d.data()));
+          items.sort((a, b) => b.createdAtMs - a.createdAtMs);
+          setMyRequests(items);
+        },
+        (error) => {
+          if (!auth.currentUser) return;
+          try {
+            handleFirestoreError(error, OperationType.LIST, "topup_requests");
+          } catch (wrapped: unknown) {
+            if (wrapped instanceof Error) setFatalError(wrapped);
+          }
+        },
+      );
+
+      const txQuery = query(
+        collection(db, "wallet_transactions"),
+        where("userId", "==", profile.id),
+      );
+      unsubTx = onSnapshot(
+        txQuery,
+        (snapshot) => {
+          const items = snapshot.docs.map((d) => mapTransactionDoc(d.id, d.data()));
+          items.sort((a, b) => b.createdAtMs - a.createdAtMs);
+          setMyTransactions(items);
+        },
+        (error) => {
+          if (!auth.currentUser) return;
+          try {
+            handleFirestoreError(error, OperationType.LIST, "wallet_transactions");
+          } catch (wrapped: unknown) {
+            if (wrapped instanceof Error) setFatalError(wrapped);
+          }
+        },
+      );
+    }
 
     const settingsPath = "app_settings/wallet";
     const unsubSettings = onSnapshot(
@@ -369,61 +403,86 @@ function App({
       },
     );
 
+    return () => {
+      unsubRequests();
+      unsubTx();
+      unsubSettings();
+    };
+  }, [isLocked, isSuperUser, profile.id, section]);
+
+  useEffect(() => {
+    initialNotifLoadedRef.current = false;
+    seenNotifIdsRef.current = {};
+
+    const unreadQuery = query(
+      collection(db, "notifications"),
+      where("userId", "==", profile.id),
+      where("is_read", "==", false),
+    );
+    const unsubUnread = onSnapshot(
+      unreadQuery,
+      (snapshot) => {
+        const items = snapshot.docs.map((d) => mapNotificationDoc(d.id, d.data()));
+        items.sort((a, b) => b.createdAtMs - a.createdAtMs);
+        setUnreadNotifications(items);
+
+        if (!initialNotifLoadedRef.current) {
+          for (const item of items) seenNotifIdsRef.current[item.id] = true;
+          initialNotifLoadedRef.current = true;
+          return;
+        }
+
+        for (const item of items) {
+          if (seenNotifIdsRef.current[item.id]) continue;
+          seenNotifIdsRef.current[item.id] = true;
+          const viewingSameChat =
+            item.type === "chat_message" &&
+            effectiveSectionRef.current === "messages" &&
+            effectiveActiveChatRef.current === item.requestId;
+          if (viewingSameChat) continue;
+
+          setToast(`إشعار جديد: ${item.title}`);
+          window.setTimeout(() => setToast(""), 4200);
+          if (
+            typeof window !== "undefined" &&
+            "Notification" in window &&
+            Notification.permission === "granted"
+          ) {
+            try {
+              new Notification(item.title, {
+                body: item.body || "لديك إشعار جديد في منصة دخل.",
+              });
+            } catch {
+              // Ignore browser notification errors inside restricted iframes
+            }
+          }
+        }
+      },
+      (error) => {
+        if (!auth.currentUser) return;
+        try {
+          handleFirestoreError(error, OperationType.LIST, "notifications");
+        } catch (wrapped: unknown) {
+          if (wrapped instanceof Error) setFatalError(wrapped);
+        }
+      },
+    );
+
+    return () => unsubUnread();
+  }, [profile.id]);
+
+  useEffect(() => {
+    if (section !== "notifications" && !notifPopoverOpen) {
+      setNotifications([]);
+      return;
+    }
+
     const notifQuery = query(collection(db, "notifications"), where("userId", "==", profile.id));
     const unsubNotifs = onSnapshot(
       notifQuery,
       (snapshot) => {
         const items = snapshot.docs.map((d) => mapNotificationDoc(d.id, d.data()));
         items.sort((a, b) => b.createdAtMs - a.createdAtMs);
-
-        setLastMessageByRequestId((prev) => {
-          let changed = false;
-          const next = { ...prev };
-          for (const item of items) {
-            if (item.type === "chat_message" && item.requestId && item.body) {
-              const existing = next[item.requestId];
-              if (!existing || item.createdAtMs >= existing.createdAtMs) {
-                next[item.requestId] = { text: item.body, createdAtMs: item.createdAtMs };
-                changed = true;
-              }
-            }
-          }
-          return changed ? next : prev;
-        });
-
-        if (!initialNotifLoadedRef.current) {
-          for (const item of items) {
-            seenNotifIdsRef.current[item.id] = true;
-          }
-          initialNotifLoadedRef.current = true;
-        } else {
-          for (const item of items) {
-            if (!seenNotifIdsRef.current[item.id]) {
-              seenNotifIdsRef.current[item.id] = true;
-              const viewingSameChat =
-                item.type === "chat_message" &&
-                effectiveSectionRef.current === "messages" &&
-                effectiveActiveChatRef.current === item.requestId;
-              if (!item.is_read && !viewingSameChat) {
-                setToast(`إشعار جديد: ${item.title}`);
-                window.setTimeout(() => setToast(""), 4200);
-                if (
-                  typeof window !== "undefined" &&
-                  "Notification" in window &&
-                  Notification.permission === "granted"
-                ) {
-                  try {
-                    new Notification(item.title, {
-                      body: item.body || "لديك إشعار جديد في منصة دخل.",
-                    });
-                  } catch {
-                    // Ignore browser notification errors inside restricted iframes
-                  }
-                }
-              }
-            }
-          }
-        }
         setNotifications(items);
       },
       (error) => {
@@ -435,6 +494,53 @@ function App({
         }
       },
     );
+    return () => unsubNotifs();
+  }, [notifPopoverOpen, profile.id, section]);
+
+  useEffect(() => {
+    if (section !== "messages") return;
+    const chatNotifQuery = query(
+      collection(db, "notifications"),
+      where("userId", "==", profile.id),
+      where("type", "==", "chat_message"),
+    );
+    const unsubChatNotifs = onSnapshot(
+      chatNotifQuery,
+      (snapshot) => {
+        setLastMessageByRequestId((prev) => {
+          const next = { ...prev };
+          for (const d of snapshot.docs) {
+            const item = mapNotificationDoc(d.id, d.data());
+            if (!item.requestId || !item.body) continue;
+            const existing = next[item.requestId];
+            if (!existing || item.createdAtMs >= existing.createdAtMs) {
+              next[item.requestId] = { text: item.body, createdAtMs: item.createdAtMs };
+            }
+          }
+          return next;
+        });
+      },
+      (error) => {
+        if (!auth.currentUser) return;
+        try {
+          handleFirestoreError(error, OperationType.LIST, "notifications");
+        } catch (wrapped: unknown) {
+          if (wrapped instanceof Error) setFatalError(wrapped);
+        }
+      },
+    );
+    return () => unsubChatNotifs();
+  }, [profile.id, section]);
+
+  useEffect(() => {
+    const needsConnections =
+      isLocked ||
+      ["home", "discover", "messages", "assign", "notifications"].includes(section);
+    if (!needsConnections) {
+      setIncomingRequests([]);
+      setOutgoingRequests([]);
+      return;
+    }
 
     const incomingConnQuery = query(
       collection(db, "connection_requests"),
@@ -479,18 +585,19 @@ function App({
     );
 
     return () => {
-      unsubWallet();
-      unsubRequests();
-      unsubTx();
-      unsubSettings();
-      unsubNotifs();
       unsubIncomingConn();
       unsubOutgoingConn();
     };
-  }, [profile.id]);
+  }, [isLocked, profile.id, section]);
 
   useEffect(() => {
-    if (!isSuperUser) return;
+    if (!isSuperUser || (section !== "admin" && section !== "assign")) {
+      setAdminRequests([]);
+      setAdminWallets({});
+      setAdminWalletsReady(false);
+      setAdminProfiles([]);
+      return;
+    }
 
     const unsubAllRequests = onSnapshot(
       collection(db, "topup_requests"),
@@ -562,7 +669,7 @@ function App({
       unsubAllWallets();
       unsubAllProfiles();
     };
-  }, [isSuperUser]);
+  }, [isSuperUser, section]);
 
   useEffect(() => {
     if (!isSuperUser || !adminWalletsReady) return;
@@ -614,39 +721,95 @@ function App({
     }
   }, [isSuperUser, adminWalletsReady, adminProfiles, adminWallets, missingAccountTypeIds]);
 
-  useEffect(() => {
-    if (isSuperUser || isLocked) {
-      setFundedProfiles([]);
-      return;
-    }
+  const shouldLoadDirectory =
+    !isLocked &&
+    ["home", "discover", "assign"].includes(section) &&
+    !(isSuperUser && section === "assign");
 
-    const fundedQuery = query(collection(db, "profiles"), where("has_balance", "==", true));
-    const unsubFunded = onSnapshot(
-      fundedQuery,
-      (snapshot) => {
+  useEffect(() => {
+    if (!shouldLoadDirectory) return;
+    let cancelled = false;
+    setDirectoryLoading(true);
+    setFundedProfiles([]);
+    directoryCursorRef.current = null;
+    setDirectoryHasMore(false);
+    const firstPageQuery = query(
+      collection(db, "profiles"),
+      where("has_balance", "==", true),
+      orderBy(documentId()),
+      limit(DIRECTORY_PAGE_SIZE),
+    );
+    void getDocs(firstPageQuery)
+      .then((snapshot) => {
+        if (cancelled) return;
         const list = snapshot.docs
           .map((d) => mapProfileDoc(d.id, d.data()))
           .filter((member) => member.account_type !== "client");
         setFundedProfiles(list);
-      },
-      (error) => {
-        if (!auth.currentUser) return;
+        directoryCursorRef.current =
+          snapshot.docs.length > 0 ? snapshot.docs[snapshot.docs.length - 1] : null;
+        setDirectoryHasMore(snapshot.size === DIRECTORY_PAGE_SIZE);
+      })
+      .catch((error: unknown) => {
+        if (!auth.currentUser || cancelled) return;
         try {
           handleFirestoreError(error, OperationType.LIST, "profiles");
         } catch (wrapped: unknown) {
           if (wrapped instanceof Error) setFatalError(wrapped);
         }
-      },
-    );
+      })
+      .finally(() => {
+        if (!cancelled) setDirectoryLoading(false);
+      });
 
-    return () => unsubFunded();
-  }, [isSuperUser, isLocked]);
+    return () => {
+      cancelled = true;
+      setDirectoryLoading(false);
+    };
+  }, [shouldLoadDirectory]);
+
+  const loadMoreDirectory = async () => {
+    const cursor = directoryCursorRef.current;
+    if (!cursor || directoryLoading || !directoryHasMore) return;
+
+    setDirectoryLoading(true);
+    try {
+      const nextPageQuery = query(
+        collection(db, "profiles"),
+        where("has_balance", "==", true),
+        orderBy(documentId()),
+        startAfter(cursor),
+        limit(DIRECTORY_PAGE_SIZE),
+      );
+      const snapshot = await getDocs(nextPageQuery);
+      const list = snapshot.docs
+        .map((d) => mapProfileDoc(d.id, d.data()))
+        .filter((member) => member.account_type !== "client");
+      setFundedProfiles((current) => [
+        ...current,
+        ...list.filter((member) => !current.some((existing) => existing.id === member.id)),
+      ]);
+      if (snapshot.docs.length > 0) {
+        directoryCursorRef.current = snapshot.docs[snapshot.docs.length - 1];
+      }
+      setDirectoryHasMore(snapshot.size === DIRECTORY_PAGE_SIZE);
+    } catch (error: unknown) {
+      if (!auth.currentUser) return;
+      try {
+        handleFirestoreError(error, OperationType.LIST, "profiles");
+      } catch (wrapped: unknown) {
+        if (wrapped instanceof Error) setFatalError(wrapped);
+      }
+    } finally {
+      setDirectoryLoading(false);
+    }
+  };
 
   const visibleDirectoryProfiles = useMemo(() => {
-    const source = isSuperUser ? adminProfiles : fundedProfiles;
+    const source = isSuperUser && section === "assign" ? adminProfiles : fundedProfiles;
     const list = source.filter((member) => {
       if (member.account_type === "client") return false;
-      if (isSuperUser) {
+      if (isSuperUser && section === "assign") {
         const w = adminWallets[member.id];
         return (w?.balance_egp ?? 0) > 0 || (w?.remaining_transactions ?? 0) > 0;
       }
@@ -665,13 +828,13 @@ function App({
       if (bReviewCount !== aReviewCount) return bReviewCount - aReviewCount;
 
       // 2) Wallet balance priority (highest wallet balance first)
-      const aWalletScore = isSuperUser
+      const aWalletScore = isSuperUser && section === "assign"
         ? computeWalletPriority(
             adminWallets[a.id]?.balance_egp ?? 0,
             adminWallets[a.id]?.remaining_transactions ?? 0,
           )
         : (a.wallet_priority ?? 0);
-      const bWalletScore = isSuperUser
+      const bWalletScore = isSuperUser && section === "assign"
         ? computeWalletPriority(
             adminWallets[b.id]?.balance_egp ?? 0,
             adminWallets[b.id]?.remaining_transactions ?? 0,
@@ -684,7 +847,7 @@ function App({
       if (projectDiff !== 0) return projectDiff;
       return a.display_name.localeCompare(b.display_name, "ar");
     });
-  }, [isSuperUser, adminProfiles, fundedProfiles, adminWallets]);
+  }, [isSuperUser, adminProfiles, fundedProfiles, adminWallets, section]);
 
   const filteredDirectoryProfiles = useMemo(() => {
     const queryText = search.trim().toLowerCase();
@@ -729,8 +892,8 @@ function App({
     setDialog("publish");
   };
 
-  const unreadNotifCount = notifications.filter((item) => !item.is_read).length;
-  const unreadChatCount = notifications.filter(
+  const unreadNotifCount = unreadNotifications.length;
+  const unreadChatCount = unreadNotifications.filter(
     (item) => !item.is_read && item.type === "chat_message",
   ).length;
 
@@ -759,19 +922,9 @@ function App({
 
   const acceptedThreads = useMemo<ChatThread[]>(() => {
     const unreadChatIds: Record<string, boolean> = {};
-    const latestNotifMsgByRequestId: Record<string, { text: string; createdAtMs: number }> = {};
-    for (const n of notifications) {
+    for (const n of unreadNotifications) {
       if (n.type !== "chat_message" || !n.requestId) continue;
-      if (!n.is_read) {
-        unreadChatIds[n.requestId] = true;
-      }
-      const prevNotif = latestNotifMsgByRequestId[n.requestId];
-      if (!prevNotif || n.createdAtMs > prevNotif.createdAtMs) {
-        latestNotifMsgByRequestId[n.requestId] = {
-          text: n.body,
-          createdAtMs: n.createdAtMs,
-        };
-      }
+      unreadChatIds[n.requestId] = true;
     }
 
     const combined = [...incomingRequests, ...outgoingRequests]
@@ -793,13 +946,7 @@ function App({
       const partnerUsername = incoming ? req.fromUsername : req.toUsername;
       const baseMs = req.respondedAtMs ?? req.createdAtMs;
       const fromActive = lastMessageByRequestId[req.id];
-      const fromNotif = latestNotifMsgByRequestId[req.id];
-      const latest =
-        fromActive && fromNotif
-          ? fromActive.createdAtMs >= fromNotif.createdAtMs
-            ? fromActive
-            : fromNotif
-          : fromActive ?? fromNotif;
+      const latest = fromActive;
       const latestMessageMs = Math.max(
         baseMs,
         req.lastMessageAtMs ?? 0,
@@ -855,7 +1002,7 @@ function App({
     incomingRequests,
     outgoingRequests,
     profile.id,
-    notifications,
+    unreadNotifications,
     lastMessageByRequestId,
     nowMs,
     unitPriceEgp,
@@ -901,7 +1048,7 @@ function App({
   }, [effectiveSection, effectiveActiveChatId]);
 
   useEffect(() => {
-    if (!effectiveActiveChatId) {
+    if (effectiveSection !== "messages" || !effectiveActiveChatId) {
       setChatMessages([]);
       setChatLoading(false);
       return;
@@ -962,11 +1109,11 @@ function App({
     );
 
     return () => unsubMessages();
-  }, [effectiveActiveChatId, profile.id]);
+  }, [effectiveSection, effectiveActiveChatId, profile.id]);
 
   useEffect(() => {
     if (effectiveSection !== "messages" || !effectiveActiveChatId) return;
-    const unreadIds = notifications
+    const unreadIds = unreadNotifications
       .filter(
         (n) => !n.is_read && n.type === "chat_message" && n.requestId === effectiveActiveChatId,
       )
@@ -974,7 +1121,7 @@ function App({
     if (unreadIds.length > 0) {
       void markAllNotificationsRead(unreadIds).catch(() => {});
     }
-  }, [effectiveSection, effectiveActiveChatId, notifications]);
+  }, [effectiveSection, effectiveActiveChatId, unreadNotifications]);
 
   const sendMessage = async () => {
     const text = messageText.trim();
@@ -1020,7 +1167,7 @@ function App({
   };
 
   const handleMarkAllNotifsRead = async () => {
-    const unreadIds = notifications.filter((item) => !item.is_read).map((item) => item.id);
+    const unreadIds = unreadNotifications.map((item) => item.id);
     if (unreadIds.length === 0) return;
     try {
       await markAllNotificationsRead(unreadIds);
@@ -1439,6 +1586,7 @@ function App({
                   activeFilter={activeFilter}
                   setActiveFilter={setActiveFilter}
                   filteredMembers={filteredDirectoryProfiles}
+                  loadingMembers={directoryLoading}
                   outgoingStatusByTarget={outgoingStatusByTarget}
                   setSection={navigateTo}
                   onConnect={(member) => openConnection(member)}
@@ -1464,6 +1612,9 @@ function App({
                   onPreviewProfile={setPreviewProfile}
                   saved={saved}
                   setSaved={setSaved}
+                  hasMore={directoryHasMore}
+                  loadingMore={directoryLoading}
+                  onLoadMore={() => void loadMoreDirectory()}
                 />
               )}
               {effectiveSection === "opportunities" && (
@@ -1502,6 +1653,9 @@ function App({
                   onOpenMessages={(partnerId?: string) => openChatThread(undefined, partnerId)}
                   onPreviewProfile={setPreviewProfile}
                   onOpenManualCredit={setManualCreditTarget}
+                  hasMore={directoryHasMore}
+                  loadingMore={directoryLoading}
+                  onLoadMore={() => void loadMoreDirectory()}
                 />
               )}
               {effectiveSection === "notifications" && (
@@ -1602,12 +1756,13 @@ function App({
                   ? navigateTo("admin")
                   : isClient
                     ? navigateTo("assign")
-                    : setDialog("topup")
+                    : navigateTo("wallet")
               }
             >
               {isSuperUser ? (
                 <>
-                  إدارة الطلبات ({formatArabicNumber(pendingAdminCount)})
+                  إدارة الطلبات
+                  {section === "admin" && ` (${formatArabicNumber(pendingAdminCount)})`}
                 </>
               ) : isClient ? (
                 <>
@@ -1622,10 +1777,7 @@ function App({
           </div>
           <div className="fee-note">
             <h3>رسوم المعاملات</h3>
-            <p>
-              أقل عدد معاملات للشحن هو {formatArabicNumber(minTransactions)} معاملات (
-              {formatArabicNumber(unitPriceEgp)} ج.م للمعاملة)، ويتم اعتماد الرصيد يدويًا من الإدارة.
-            </p>
+            <p>افتح المحفظة لمعرفة رسوم المعاملات الحالية وشروط الشحن.</p>
           </div>
           <div className="trust-note">
             <ShieldCheck size={17} />
@@ -1843,6 +1995,7 @@ function HomeContent(props: {
   activeFilter: string;
   setActiveFilter: (value: string) => void;
   filteredMembers: DakhlProfile[];
+  loadingMembers: boolean;
   outgoingStatusByTarget: Record<string, ConnectionRequestStatus>;
   setSection: (section: Section) => void;
   onConnect: (member: DakhlProfile) => void;
@@ -1957,7 +2110,9 @@ function HomeContent(props: {
           ))}
           {props.filteredMembers.length === 0 && (
             <div className="empty-state">
-              {props.search.trim() || props.activeFilter !== "الكل"
+              {props.loadingMembers
+                ? "جارٍ تحميل المستقلين..."
+                : props.search.trim() || props.activeFilter !== "الكل"
                 ? "لا توجد نتائج مطابقة. جرّب كلمة بحث أخرى."
                 : "لا يوجد أعضاء متاحون للعرض حاليًا."}
             </div>
@@ -2003,6 +2158,9 @@ function DiscoverContent(props: {
   onPreviewProfile: (member: DakhlProfile) => void;
   saved: string[];
   setSaved: (value: string[] | ((current: string[]) => string[])) => void;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => void;
 }) {
   return (
     <section className="section-block discover-page" style={{ marginTop: 0 }}>
@@ -2049,12 +2207,27 @@ function DiscoverContent(props: {
         ))}
         {props.members.length === 0 && (
           <div className="empty-state">
-            {props.search.trim() || props.activeFilter !== "الكل"
+            {props.loadingMore
+              ? "جارٍ تحميل المستقلين..."
+              : props.search.trim() || props.activeFilter !== "الكل"
               ? "لا توجد نتائج مطابقة لهذا التصنيف."
               : "لا يوجد أعضاء متاحون للاكتشاف حاليًا."}
           </div>
         )}
       </div>
+      {props.hasMore && (
+        <div style={{ display: "flex", justifyContent: "center", marginTop: 20 }}>
+          <button
+            type="button"
+            className="primary-button"
+            disabled={props.loadingMore}
+            onClick={props.onLoadMore}
+          >
+            {props.loadingMore ? <LoaderCircle size={16} className="spin" /> : <Plus size={16} />}
+            {props.loadingMore ? "جارٍ التحميل..." : "عرض المزيد من المستقلين"}
+          </button>
+        </div>
+      )}
     </section>
   );
 }
@@ -2171,6 +2344,9 @@ function AssignContent({
   onOpenMessages,
   onPreviewProfile,
   onOpenManualCredit,
+  hasMore,
+  loadingMore,
+  onLoadMore,
 }: {
   currentUserId: string;
   isSuperUser: boolean;
@@ -2185,6 +2361,9 @@ function AssignContent({
   onOpenMessages: (partnerId?: string) => void;
   onPreviewProfile: (member: DakhlProfile) => void;
   onOpenManualCredit: (target: DakhlProfile) => void;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => void;
 }) {
   const [skillFilter, setSkillFilter] = useState("الكل");
 
@@ -2362,12 +2541,27 @@ function AssignContent({
         })}
         {visibleMembers.length === 0 && (
           <div className="empty-state">
-            {search.trim() || skillFilter !== "الكل"
+            {loadingMore
+              ? "جارٍ تحميل المستقلين..."
+              : search.trim() || skillFilter !== "الكل"
               ? "لا توجد نتائج مطابقة للبحث الحالي."
               : "لا يوجد مستقلون لديهم رصيد متاح للعرض حاليًا."}
           </div>
         )}
       </div>
+      {hasMore && (
+        <div style={{ display: "flex", justifyContent: "center", marginTop: 20 }}>
+          <button
+            type="button"
+            className="primary-button"
+            disabled={loadingMore}
+            onClick={onLoadMore}
+          >
+            {loadingMore ? <LoaderCircle size={16} className="spin" /> : <Plus size={16} />}
+            {loadingMore ? "جارٍ التحميل..." : "عرض المزيد من المستقلين"}
+          </button>
+        </div>
+      )}
     </section>
   );
 }
