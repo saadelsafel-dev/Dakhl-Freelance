@@ -501,7 +501,7 @@ export function mapSingleProject(idFallback: string, entry: unknown): PortfolioP
   const imageUrl =
     typeof obj.image_url === "string" &&
     obj.image_url.length <= 180000 &&
-    /^data:image\/webp;base64,[A-Za-z0-9+/=]+$/.test(obj.image_url)
+    /^data:image\/(webp|jpeg);base64,[A-Za-z0-9+/=]+$/.test(obj.image_url)
       ? obj.image_url
       : null;
   const videoDriveUrl =
@@ -635,7 +635,7 @@ export async function updateUserProfile(params: {
   const cleanCover =
     typeof params.cover_url === "string" &&
     params.cover_url.length <= 165000 &&
-    /^data:image\/webp;base64,[A-Za-z0-9+/=]+$/.test(params.cover_url)
+    /^data:image\/(webp|jpeg);base64,[A-Za-z0-9+/=]+$/.test(params.cover_url)
       ? params.cover_url
       : null;
 
@@ -671,7 +671,7 @@ export function mapProfileDoc(id: string, data: Record<string, unknown>): DakhlP
   const rawCover =
     typeof data.cover_url === "string" &&
     data.cover_url.length <= 165000 &&
-    /^data:image\/webp;base64,[A-Za-z0-9+/=]+$/.test(data.cover_url)
+    /^data:image\/(webp|jpeg);base64,[A-Za-z0-9+/=]+$/.test(data.cover_url)
       ? data.cover_url
       : null;
   return {

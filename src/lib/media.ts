@@ -26,14 +26,19 @@ export async function convertImageToWebpDataUrl(
       canvas.height = height;
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("CANVAS_UNAVAILABLE");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, width, height);
       ctx.drawImage(img, 0, 0, width, height);
 
+      const supportsWebp = canvas
+        .toDataURL("image/webp", 0.8)
+        .startsWith("data:image/webp;base64,");
+      const mimeType = supportsWebp ? "image/webp" : "image/jpeg";
+      const expectedPrefix = `data:${mimeType};base64,`;
+
       for (const quality of [0.82, 0.7, 0.58, 0.45, 0.34, 0.24]) {
-        const dataUrl = canvas.toDataURL("image/webp", quality);
-        if (
-          dataUrl.startsWith("data:image/webp;base64,") &&
-          dataUrl.length <= options.maxLength
-        ) {
+        const dataUrl = canvas.toDataURL(mimeType, quality);
+        if (dataUrl.startsWith(expectedPrefix) && dataUrl.length <= options.maxLength) {
           return dataUrl;
         }
       }

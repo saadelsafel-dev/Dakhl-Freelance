@@ -4287,10 +4287,12 @@ function ProjectCard({
   project,
   onPreviewImage,
   onDelete,
+  deleteDisabled = false,
 }: {
   project: PortfolioProject;
   onPreviewImage: (url: string, title: string) => void;
   onDelete?: () => void;
+  deleteDisabled?: boolean;
 }) {
   return (
     <article
@@ -4351,6 +4353,7 @@ function ProjectCard({
             <button
               type="button"
               className="cancel-button"
+              disabled={deleteDisabled}
               onClick={onDelete}
               style={{ padding: "4px 8px", fontSize: 10, color: "#8d5149" }}
               aria-label={`حذف مشروع ${project.title}`}
@@ -4400,6 +4403,7 @@ function ProfileContent({
   const [interests, setInterests] = useState<string[]>(profile.interests);
   const [subcollectionProjects, setSubcollectionProjects] = useState<PortfolioProject[]>([]);
   const [projects, setProjects] = useState<PortfolioProject[]>(profile.projects ?? []);
+  const deletedEditIdsRef = useRef<Set<string>>(new Set());
 
   const [projMediaType, setProjMediaType] = useState<"image" | "video">("image");
   const [projTitle, setProjTitle] = useState("");
@@ -4414,7 +4418,18 @@ function ProfileContent({
     let cancelled = false;
     void fetchProfileSubcollectionProjects(profile.id, true)
       .then((items) => {
-        if (!cancelled) setSubcollectionProjects(items);
+        if (cancelled) return;
+        setSubcollectionProjects(items);
+        setProjects((curr) => {
+          const byId = new Map<string, PortfolioProject>();
+          for (const item of curr) byId.set(item.id, item);
+          for (const item of items) {
+            if (!deletedEditIdsRef.current.has(item.id)) {
+              byId.set(item.id, item);
+            }
+          }
+          return Array.from(byId.values()).slice(0, 3);
+        });
       })
       .catch((error: unknown) => {
         console.error("Failed loading profile subcollection projects:", error);
@@ -4438,6 +4453,7 @@ function ProfileContent({
 
   useEffect(() => {
     if (!editing && !addingProject) {
+      deletedEditIdsRef.current.clear();
       setDisplayName(profile.display_name);
       setAvatarUrl(profile.avatar_url);
       setCoverUrl(profile.cover_url ?? null);
@@ -4615,6 +4631,13 @@ function ProfileContent({
     }
   }
 
+  function createSafeProjectId(): string {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+    return `proj_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  }
+
   function buildValidatedDraftProject(): PortfolioProject | null {
     const cleanTitle = projTitle.trim().slice(0, 80);
     if (cleanTitle.length < 2) {
@@ -4628,7 +4651,7 @@ function ProfileContent({
         return null;
       }
       return {
-        id: crypto.randomUUID(),
+        id: createSafeProjectId(),
         title: cleanTitle,
         description: projDesc.trim().slice(0, 300) || null,
         image_url: projImageUrl,
@@ -4643,7 +4666,7 @@ function ProfileContent({
     }
 
     return {
-      id: crypto.randomUUID(),
+      id: createSafeProjectId(),
       title: cleanTitle,
       description: projDesc.trim().slice(0, 300) || null,
       image_url: null,
@@ -5184,9 +5207,11 @@ function ProfileContent({
                     key={proj.id}
                     project={proj}
                     onPreviewImage={onPreviewImage}
-                    onDelete={() =>
-                      setProjects((current) => current.filter((item) => item.id !== proj.id))
-                    }
+                    deleteDisabled={saving}
+                    onDelete={() => {
+                      deletedEditIdsRef.current.add(proj.id);
+                      setProjects((current) => current.filter((item) => item.id !== proj.id));
+                    }}
                   />
                 ))}
               </div>
@@ -5443,6 +5468,7 @@ function ProfileContent({
                     key={proj.id}
                     project={proj}
                     onPreviewImage={onPreviewImage}
+                    deleteDisabled={projBusy}
                     onDelete={() => void handleDeleteStandaloneProject(proj.id)}
                   />
                 ))}
