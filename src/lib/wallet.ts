@@ -1,12 +1,17 @@
 import {
+  collection,
+  deleteDoc,
   doc,
   getDoc,
+  getDocs,
   increment,
+  query,
   runTransaction,
   serverTimestamp,
   setDoc,
   Timestamp,
   updateDoc,
+  where,
   writeBatch,
 } from "firebase/firestore";
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
@@ -481,44 +486,110 @@ export async function syncProfileBalanceVisibility(
   }
 }
 
+export function mapSingleProject(idFallback: string, entry: unknown): PortfolioProject | null {
+  if (typeof entry !== "object" || entry === null) return null;
+  const obj = entry as Record<string, unknown>;
+  const rawId = typeof obj.id === "string" && obj.id ? obj.id : idFallback;
+  const id = /^[a-zA-Z0-9_-]{1,128}$/.test(rawId) ? rawId : "";
+  const title = typeof obj.title === "string" ? obj.title.trim().slice(0, 80) : "";
+  if (!id || title.length < 2) return null;
+
+  const description =
+    typeof obj.description === "string" && obj.description.trim()
+      ? obj.description.trim().slice(0, 300)
+      : null;
+  const imageUrl =
+    typeof obj.image_url === "string" &&
+    obj.image_url.length <= 180000 &&
+    /^data:image\/webp;base64,[A-Za-z0-9+/=]+$/.test(obj.image_url)
+      ? obj.image_url
+      : null;
+  const videoDriveUrl =
+    typeof obj.video_drive_url === "string"
+      ? parseGoogleDriveVideoUrl(obj.video_drive_url)
+      : null;
+
+  if (!imageUrl && !videoDriveUrl) return null;
+  const normalizedImage = imageUrl;
+  const normalizedVideo = normalizedImage ? null : videoDriveUrl;
+  return {
+    id,
+    title,
+    description,
+    image_url: normalizedImage,
+    video_drive_url: normalizedVideo,
+  };
+}
+
 export function mapProjectsArray(raw: unknown): PortfolioProject[] {
   if (!Array.isArray(raw)) return [];
   const items: PortfolioProject[] = [];
   for (const entry of raw) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const obj = entry as Record<string, unknown>;
-    const id = typeof obj.id === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(obj.id) ? obj.id : "";
-    const title = typeof obj.title === "string" ? obj.title.trim().slice(0, 80) : "";
-    if (!id || title.length < 2) continue;
-
-    const description =
-      typeof obj.description === "string" && obj.description.trim()
-        ? obj.description.trim().slice(0, 300)
-        : null;
-    const imageUrl =
-      typeof obj.image_url === "string" &&
-      obj.image_url.length <= 180000 &&
-      /^data:image\/webp;base64,[A-Za-z0-9+/=]+$/.test(obj.image_url)
-        ? obj.image_url
-        : null;
-    const videoDriveUrl =
-      typeof obj.video_drive_url === "string"
-        ? parseGoogleDriveVideoUrl(obj.video_drive_url)
-        : null;
-
-    if (!imageUrl && !videoDriveUrl) continue;
-    const normalizedImage = imageUrl;
-    const normalizedVideo = normalizedImage ? null : videoDriveUrl;
-    items.push({
-      id,
-      title,
-      description,
-      image_url: normalizedImage,
-      video_drive_url: normalizedVideo,
-    });
+    const mapped = mapSingleProject("", entry);
+    if (!mapped) continue;
+    items.push(mapped);
     if (items.length >= 3) break;
   }
   return items;
+}
+
+export async function fetchProfileSubcollectionProjects(
+  userId: string,
+  includePrivate = false,
+): Promise<PortfolioProject[]> {
+  const path = `profiles/${userId}/projects`;
+  try {
+    const projectsQuery = includePrivate
+      ? query(collection(db, "profiles", userId, "projects"), where("ownerId", "==", userId))
+      : query(collection(db, "profiles", userId, "projects"), where("isPublic", "==", true));
+    const snapshot = await getDocs(projectsQuery);
+    const items = snapshot.docs
+      .map((d) => ({
+        project: mapSingleProject(d.id, d.data()),
+        createdAtMs: timestampToMillis(d.data().createdAt),
+      }))
+      .filter((item): item is { project: PortfolioProject; createdAtMs: number } => item.project !== null);
+    items.sort((a, b) => a.createdAtMs - b.createdAtMs);
+    return items.map((item) => item.project).slice(0, 3);
+  } catch (error: unknown) {
+    handleFirestoreError(error, OperationType.LIST, path);
+  }
+}
+
+export async function addProfileProject(
+  profile: DakhlProfile,
+  project: PortfolioProject,
+): Promise<PortfolioProject> {
+  const cleanProject = mapSingleProject(project.id, project);
+  if (!cleanProject) {
+    throw new Error("INVALID_PROJECT");
+  }
+  const path = `profiles/${profile.id}/projects/${cleanProject.id}`;
+  try {
+    await setDoc(doc(db, "profiles", profile.id, "projects", cleanProject.id), {
+      id: cleanProject.id,
+      ownerId: profile.id,
+      title: cleanProject.title,
+      description: cleanProject.description,
+      image_url: cleanProject.image_url,
+      video_drive_url: cleanProject.video_drive_url,
+      isPublic: profile.account_type !== "client",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    return cleanProject;
+  } catch (error: unknown) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export async function deleteProfileProject(userId: string, projectId: string): Promise<void> {
+  const path = `profiles/${userId}/projects/${projectId}`;
+  try {
+    await deleteDoc(doc(db, "profiles", userId, "projects", projectId));
+  } catch (error: unknown) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
 }
 
 export async function updateUserProfile(params: {
@@ -530,7 +601,7 @@ export async function updateUserProfile(params: {
   city: string | null;
   bio: string | null;
   portfolio_url: string | null;
-  projects: PortfolioProject[];
+  projects?: PortfolioProject[];
   experience_level: ExperienceLevel;
   skills: string[];
   interests: string[];
@@ -559,7 +630,6 @@ export async function updateUserProfile(params: {
     throw new Error("INVALID_PORTFOLIO_URL");
   }
 
-  const cleanProjects = mapProjectsArray(params.projects).slice(0, 3);
   const cleanAvatar =
     params.avatar_url && params.avatar_url.length <= 50000 ? params.avatar_url : null;
   const cleanCover =
@@ -569,22 +639,27 @@ export async function updateUserProfile(params: {
       ? params.cover_url
       : null;
 
+  const payload: Record<string, unknown> = {
+    display_name: cleanName,
+    avatar_url: cleanAvatar,
+    cover_url: cleanCover,
+    governorate: params.governorate?.trim().slice(0, 80) || null,
+    city: params.city?.trim().slice(0, 80) || null,
+    bio: params.bio?.trim().slice(0, 500) || null,
+    portfolio_url: cleanPortfolioUrl,
+    experience_level: params.experience_level,
+    skills: cleanSkills,
+    interests: cleanInterests,
+    updatedAt: serverTimestamp(),
+  };
+
+  if (params.projects !== undefined) {
+    payload.projects = mapProjectsArray(params.projects).slice(0, 3);
+  }
+
   const path = `profiles/${params.userId}`;
   try {
-    await updateDoc(doc(db, "profiles", params.userId), {
-      display_name: cleanName,
-      avatar_url: cleanAvatar,
-      cover_url: cleanCover,
-      governorate: params.governorate?.trim().slice(0, 80) || null,
-      city: params.city?.trim().slice(0, 80) || null,
-      bio: params.bio?.trim().slice(0, 500) || null,
-      portfolio_url: cleanPortfolioUrl,
-      projects: cleanProjects,
-      experience_level: params.experience_level,
-      skills: cleanSkills,
-      interests: cleanInterests,
-      updatedAt: serverTimestamp(),
-    });
+    await updateDoc(doc(db, "profiles", params.userId), payload);
   } catch (error: unknown) {
     handleFirestoreError(error, OperationType.UPDATE, path);
   }

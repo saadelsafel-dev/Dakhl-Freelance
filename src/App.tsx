@@ -65,10 +65,13 @@ import {
   sanitizeExternalHttpUrl,
 } from "./lib/media";
 import {
+  addProfileProject,
   approveTopupRequest,
   cancelConnectionDeal,
   computeWalletPriority,
   confirmDealDelivery,
+  deleteProfileProject,
+  fetchProfileSubcollectionProjects,
   formatArabicDate,
   INACTIVITY_CHECKIN_MS,
   manualCreditWallet,
@@ -4395,6 +4398,7 @@ function ProfileContent({
   const [skills, setSkills] = useState<string[]>(profile.skills);
   const [customSkill, setCustomSkill] = useState("");
   const [interests, setInterests] = useState<string[]>(profile.interests);
+  const [subcollectionProjects, setSubcollectionProjects] = useState<PortfolioProject[]>([]);
   const [projects, setProjects] = useState<PortfolioProject[]>(profile.projects ?? []);
 
   const [projMediaType, setProjMediaType] = useState<"image" | "video">("image");
@@ -4405,6 +4409,32 @@ function ProfileContent({
   const [projError, setProjError] = useState("");
   const [projBusy, setProjBusy] = useState(false);
   const [mediaBusy, setMediaBusy] = useState<"avatar" | "cover" | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchProfileSubcollectionProjects(profile.id, true)
+      .then((items) => {
+        if (!cancelled) setSubcollectionProjects(items);
+      })
+      .catch((error: unknown) => {
+        console.error("Failed loading profile subcollection projects:", error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [profile.id]);
+
+  const legacyProjects = useMemo(() => profile.projects ?? [], [profile.projects]);
+  const savedProjects = useMemo(() => {
+    const byId = new Map<string, PortfolioProject>();
+    for (const item of legacyProjects) byId.set(item.id, item);
+    for (const item of subcollectionProjects) byId.set(item.id, item);
+    return Array.from(byId.values()).slice(0, 3);
+  }, [legacyProjects, subcollectionProjects]);
+  const subcollectionProjectIds = useMemo(
+    () => new Set(subcollectionProjects.map((item) => item.id)),
+    [subcollectionProjects],
+  );
 
   useEffect(() => {
     if (!editing && !addingProject) {
@@ -4418,14 +4448,13 @@ function ProfileContent({
       setExperienceLevel(profile.experience_level ?? "no_experience");
       setSkills(profile.skills);
       setInterests(profile.interests);
-      setProjects(profile.projects ?? []);
+      setProjects(savedProjects);
     }
-  }, [profile, editing, addingProject]);
+  }, [profile, editing, addingProject, savedProjects]);
 
   const location = [profile.city, profile.governorate].filter(Boolean).join("، ");
   const accountLabel =
     profile.account_type === "client" ? "صاحب مشروع (عميل)" : "مستقل (فريلانسر)";
-  const savedProjects = profile.projects ?? [];
   const activeCover = editing ? coverUrl : (profile.cover_url ?? null);
   const activeAvatar = editing ? avatarUrl : profile.avatar_url;
 
@@ -4448,7 +4477,6 @@ function ProfileContent({
       city: profile.city,
       bio: profile.bio,
       portfolio_url: profile.portfolio_url ?? null,
-      projects: profile.projects ?? [],
       experience_level: profile.experience_level ?? "no_experience",
       skills: profile.skills,
       interests: profile.interests,
@@ -4634,20 +4662,10 @@ function ProfileContent({
     setProjBusy(true);
     setProjError("");
     try {
-      await updateUserProfile({
-        userId: profile.id,
-        display_name: profile.display_name,
-        avatar_url: profile.avatar_url,
-        cover_url: profile.cover_url ?? null,
-        governorate: profile.governorate,
-        city: profile.city,
-        bio: profile.bio,
-        portfolio_url: profile.portfolio_url ?? null,
-        projects: [...savedProjects, newProject].slice(0, 3),
-        experience_level: profile.experience_level ?? "no_experience",
-        skills: profile.skills,
-        interests: profile.interests,
-      });
+      const created = await addProfileProject(profile, newProject);
+      setSubcollectionProjects((curr) =>
+        [...curr.filter((item) => item.id !== created.id), created].slice(0, 3),
+      );
       resetProjectDraft();
       setAddingProject(false);
       onNotify("تمت إضافة المشروع إلى ملفك الشخصي.");
@@ -4664,21 +4682,26 @@ function ProfileContent({
     setProjBusy(true);
     setProjError("");
     try {
-      const nextProjects = savedProjects.filter((p) => p.id !== projectId);
-      await updateUserProfile({
-        userId: profile.id,
-        display_name: profile.display_name,
-        avatar_url: profile.avatar_url,
-        cover_url: profile.cover_url ?? null,
-        governorate: profile.governorate,
-        city: profile.city,
-        bio: profile.bio,
-        portfolio_url: profile.portfolio_url ?? null,
-        projects: nextProjects,
-        experience_level: profile.experience_level ?? "no_experience",
-        skills: profile.skills,
-        interests: profile.interests,
-      });
+      if (subcollectionProjectIds.has(projectId)) {
+        await deleteProfileProject(profile.id, projectId);
+        setSubcollectionProjects((curr) => curr.filter((p) => p.id !== projectId));
+      } else {
+        const nextLegacyProjects = legacyProjects.filter((p) => p.id !== projectId);
+        await updateUserProfile({
+          userId: profile.id,
+          display_name: profile.display_name,
+          avatar_url: profile.avatar_url,
+          cover_url: profile.cover_url ?? null,
+          governorate: profile.governorate,
+          city: profile.city,
+          bio: profile.bio,
+          portfolio_url: profile.portfolio_url ?? null,
+          projects: nextLegacyProjects,
+          experience_level: profile.experience_level ?? "no_experience",
+          skills: profile.skills,
+          interests: profile.interests,
+        });
+      }
       onNotify("تم حذف المشروع.");
     } catch (error: unknown) {
       onNotify(formatProfileSaveError(error, "تعذر حذف المشروع. حاول مرة أخرى."));
@@ -4739,6 +4762,31 @@ function ProfileContent({
 
     setSaving(true);
     try {
+      const cappedFinal = finalProjects.slice(0, 3);
+      const finalIds = new Set(cappedFinal.map((p) => p.id));
+      const legacyIds = new Set(legacyProjects.map((p) => p.id));
+      const removedSubIds = subcollectionProjects
+        .filter((p) => !finalIds.has(p.id))
+        .map((p) => p.id);
+      const keptLegacy = legacyProjects.filter((p) => finalIds.has(p.id));
+      const newSubProjects = cappedFinal.filter(
+        (p) => !legacyIds.has(p.id) && !subcollectionProjectIds.has(p.id),
+      );
+
+      for (const id of removedSubIds) {
+        await deleteProfileProject(profile.id, id);
+      }
+      const createdSubProjects: PortfolioProject[] = [];
+      for (const item of newSubProjects) {
+        const created = await addProfileProject(profile, item);
+        createdSubProjects.push(created);
+      }
+
+      setSubcollectionProjects((curr) => [
+        ...curr.filter((p) => finalIds.has(p.id)),
+        ...createdSubProjects,
+      ]);
+
       await updateUserProfile({
         userId: profile.id,
         display_name: cleanName,
@@ -4748,7 +4796,7 @@ function ProfileContent({
         city: city.trim() || null,
         bio: bio.trim() || null,
         portfolio_url: cleanPortfolio,
-        projects: finalProjects.slice(0, 3),
+        projects: keptLegacy.length !== legacyProjects.length ? keptLegacy : undefined,
         experience_level: experienceLevel,
         skills,
         interests,
@@ -5579,8 +5627,30 @@ function ProfilePreviewDialog({
   onPreviewImage: (url: string, title: string) => void;
 }) {
   const location = [member.city, member.governorate].filter(Boolean).join("، ") || "غير محدد";
-  const projects = member.projects ?? [];
   const isSelf = member.id === currentUserId;
+  const [subcollectionProjects, setSubcollectionProjects] = useState<PortfolioProject[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSubcollectionProjects([]);
+    void fetchProfileSubcollectionProjects(member.id, isSelf || isSuperUser)
+      .then((items) => {
+        if (!cancelled) setSubcollectionProjects(items);
+      })
+      .catch((error: unknown) => {
+        console.error("Failed loading member subcollection projects:", error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [member.id, isSelf, isSuperUser]);
+
+  const projects = useMemo(() => {
+    const byId = new Map<string, PortfolioProject>();
+    for (const item of member.projects ?? []) byId.set(item.id, item);
+    for (const item of subcollectionProjects) byId.set(item.id, item);
+    return Array.from(byId.values()).slice(0, 3);
+  }, [member.projects, subcollectionProjects]);
 
   return (
     <div

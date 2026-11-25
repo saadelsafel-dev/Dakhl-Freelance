@@ -622,12 +622,71 @@
         "text",
         "createdAt"
       ]
+    },
+    "ProfileProject": {
+      "title": "Portfolio Project",
+      "description": "Individual portfolio showcase project stored in a subcollection under the owner's profile.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "image_url": {
+          "type": "string",
+          "maxLength": 180000
+        },
+        "video_drive_url": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "isPublic": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "title",
+        "isPublic",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
     "/profiles/{userId}": {
       "schema": { "$ref": "#/entities/Profile" },
       "description": "Completed user profiles keyed by Firebase Auth UID."
+    },
+    "/profiles/{userId}/projects/{projectId}": {
+      "schema": { "$ref": "#/entities/ProfileProject" },
+      "description": "Individual portfolio projects stored in a subcollection to avoid large inline document payloads."
     },
     "/usernames/{username}": {
       "schema": { "$ref": "#/entities/UsernameReservation" },
