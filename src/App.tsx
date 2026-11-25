@@ -4539,6 +4539,31 @@ function ProfileContent({
     }
   }
 
+  function formatProfileSaveError(error: unknown, fallback: string): string {
+    console.error("Profile project/save error:", error);
+    const raw = error instanceof Error ? error.message : String(error ?? "");
+    const lower = raw.toLowerCase();
+    if (raw === "IMAGE_TOO_LARGE") {
+      return "حجم الصورة كبير جدًا حتى بعد الضغط. جرّب صورة أخرى أصغر.";
+    }
+    if (raw === "INVALID_IMAGE") {
+      return "الملف المختار ليس صورة صالحة.";
+    }
+    if (raw === "INVALID_PORTFOLIO_URL") {
+      return "أدخل رابط بورتفوليو صحيحًا يبدأ بـ https:// أو http://.";
+    }
+    if (lower.includes("quota") || lower.includes("resource-exhausted")) {
+      return "تم تجاوز الحد اليومي لقاعدة البيانات مؤقتًا. حاول مرة أخرى لاحقًا.";
+    }
+    if (lower.includes("maximum") || lower.includes("exceeds") || lower.includes("invalid-argument")) {
+      return "حجم الصور والبيانات في الملف الشخصي كبير جدًا. جرّب صورة أصغر حجمًا.";
+    }
+    if (lower.includes("permission") || lower.includes("insufficient")) {
+      return "تعذر التحقق من صلاحية الحفظ أو صيغة البيانات. حاول مرة أخرى.";
+    }
+    return fallback;
+  }
+
   async function handleProjectImageChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -4555,8 +4580,8 @@ function ProfileContent({
         maxLength: PROJECT_IMAGE_MAX_LENGTH,
       });
       setProjImageUrl(webpUrl);
-    } catch {
-      setProjError("تعذر تجهيز الصورة. جرّب صورة أخرى.");
+    } catch (error: unknown) {
+      setProjError(formatProfileSaveError(error, "تعذر تجهيز الصورة. جرّب صورة أخرى."));
     } finally {
       setProjBusy(false);
     }
@@ -4626,8 +4651,10 @@ function ProfileContent({
       resetProjectDraft();
       setAddingProject(false);
       onNotify("تمت إضافة المشروع إلى ملفك الشخصي.");
-    } catch {
-      setProjError("تعذر حفظ المشروع. لم تُحفظ البيانات؛ حاول مرة أخرى.");
+    } catch (error: unknown) {
+      setProjError(
+        formatProfileSaveError(error, "تعذر حفظ المشروع. لم تُحفظ البيانات؛ حاول مرة أخرى."),
+      );
     } finally {
       setProjBusy(false);
     }
@@ -4635,6 +4662,7 @@ function ProfileContent({
 
   async function handleDeleteStandaloneProject(projectId: string) {
     setProjBusy(true);
+    setProjError("");
     try {
       const nextProjects = savedProjects.filter((p) => p.id !== projectId);
       await updateUserProfile({
@@ -4653,7 +4681,7 @@ function ProfileContent({
       });
       onNotify("تم حذف المشروع.");
     } catch (error: unknown) {
-      if (error instanceof Error) onFatalError(error);
+      onNotify(formatProfileSaveError(error, "تعذر حذف المشروع. حاول مرة أخرى."));
     } finally {
       setProjBusy(false);
     }
@@ -4729,11 +4757,9 @@ function ProfileContent({
       setEditing(false);
       onNotify("تم حفظ تعديلات ملفك الشخصي بنجاح.");
     } catch (error: unknown) {
-      if (error instanceof Error && error.message === "INVALID_PORTFOLIO_URL") {
-        setEditError("أدخل رابط بورتفوليو صحيحًا.");
-      } else {
-        setEditError("تعذر حفظ التعديلات. لم تُحفظ البيانات؛ حاول مرة أخرى.");
-      }
+      setEditError(
+        formatProfileSaveError(error, "تعذر حفظ التعديلات. لم تُحفظ البيانات؛ حاول مرة أخرى."),
+      );
     } finally {
       setSaving(false);
     }

@@ -16,7 +16,7 @@ export async function convertImageToWebpDataUrl(
     });
 
     let currentMaxSide = options.maxSide;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
       const scale = Math.min(1, currentMaxSide / Math.max(img.width, img.height));
       const width = Math.max(1, Math.round(img.width * scale));
       const height = Math.max(1, Math.round(img.height * scale));
@@ -38,7 +38,7 @@ export async function convertImageToWebpDataUrl(
         }
       }
 
-      currentMaxSide = Math.max(240, Math.round(currentMaxSide * 0.7));
+      currentMaxSide = Math.max(160, Math.round(currentMaxSide * 0.7));
     }
 
     throw new Error("IMAGE_TOO_LARGE");
